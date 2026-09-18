@@ -1,1 +1,1 @@
-from .train_gp import GPy_test, Sparse_GPy_test, write_train_data
+from .train_gp import GPy_test, Sparse_GPy_test, write_train_data, test_train_gp

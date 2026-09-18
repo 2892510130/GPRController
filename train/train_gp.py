@@ -6,6 +6,7 @@ from colorama import Fore
 from typing import Any, Sequence
 
 from utils.criterion import Criterion
+from utils.config import TrainConfig
 
 
 FEATURE_COLUMNS = slice(2, 6)
@@ -101,25 +102,25 @@ def get_pre_processed_data(
     return features, responses, additional_data
 
 
-def _get_training_data(param_set: dict[str, Any], select_index: Sequence[int] | None = None):
+def _get_training_data(config: dict[str, Any], select_index: Sequence[int] | None = None):
     """Load training features and select the requested output dimension."""
     features, responses, _ = get_pre_processed_data(
-        param_set["train_data_number"],
-        param_set["input_window"],
-        param_set["train_file_path"],
-        param_set["gap_window"],
+        config.train_data_number,
+        config.input_window,
+        config.train_file_path,
+        config.gap_window,
         select=select_index,
     )
-    return features, responses[:, param_set.get("_output_id", 0)]
+    return features, responses[:, config.get("_output_id", 0)]
 
 
-def _get_test_data(param_set: dict[str, Any], output_id: int, select_index=None):
+def _get_test_data(config: dict[str, Any], output_id: int, select_index=None):
     """Load test features and select the requested output dimension."""
     features, responses, _ = get_pre_processed_data(
-        param_set["test_data_number"],
-        param_set["input_window"],
-        param_set["test_file_path"],
-        param_set["gap_window"],
+        config.test_data_number,
+        config.input_window,
+        config.test_file_path,
+        config.gap_window,
         select=select_index,
     )
     return features, responses[:, output_id]
@@ -271,11 +272,7 @@ def _plot_predictions(prediction, responses, uncertainty):
 
 
 def GPy_test(
-    param_set: dict[str, Any],
-    print_enable: bool,
-    plot_enable: bool,
-    optimize: bool,
-    write_data: bool,
+    config: TrainConfig,
     output_id: int,
 ):
     criterion = Criterion()
@@ -285,10 +282,10 @@ def GPy_test(
 
     # Load training data before any calculation that depends on it.
     features, responses = get_pre_processed_data(
-        param_set["train_data_number"],
-        param_set["input_window"],
-        param_set["train_file_path"],
-        param_set["gap_window"],
+        config.train_data_number,
+        config.input_window,
+        config.train_file_path,
+        config.gap_window,
         select=select_index,
     )[:2]
     responses = responses[:, output_id]
@@ -300,7 +297,7 @@ def GPy_test(
     _ = alpha  # Preserved from the original implementation; currently unused.
 
     input_dim = 4 * (
-        param_set["input_window"] - param_set["gap_window"]
+        config.input_window - config.gap_window
     )
     kernel = _create_full_kernel(input_dim)
 
@@ -311,21 +308,21 @@ def GPy_test(
         normalizer=normalize_y,
     )
 
-    if optimize:
+    if config.optimize:
         model.optimize_restarts(num_restarts=5)
 
     test_features, test_responses = get_pre_processed_data(
-        param_set["test_data_number"],
-        param_set["input_window"],
-        param_set["test_file_path"],
-        param_set["gap_window"],
+        config.test_data_number,
+        config.input_window,
+        config.test_file_path,
+        config.gap_window,
         select=select_index,
     )[:2]
     test_responses = test_responses[:, output_id]
 
     prediction, uncertainty = _predict(model, test_features)
 
-    if print_enable:
+    if config.print:
         _print_full_model_info(model)
         _print_metrics(
             criterion,
@@ -337,46 +334,40 @@ def GPy_test(
             sparse=False,
         )
 
-    if plot_enable:
+    if config.plot:
         _plot_predictions(prediction, test_responses, uncertainty)
 
-    if write_data:
+    if config.write_data:
         feature_size = features.shape[1]
         with open("../../Log/fixed_data/0.txt", "w") as file:
-            for row in features[: param_set["train_data_number"], :feature_size]:
+            for row in features[: config.train_data_number, :feature_size]:
                 file.write(" ".join(map(str, row)) + "\n")
 
 
 def Sparse_GPy_test(
-    param_set: dict[str, Any],
-    print_enable: bool,
-    plot_enable: bool,
-    optimize: bool,
-    write_data: bool,
+    config: TrainConfig,
     output_id: int,
 ):
     criterion = Criterion()
     select_index: list[int] = []
-    normalize_y = False
-    sparse_method = "FITC"
 
     print(
-        f"{Fore.BLUE}[INFO]:{Fore.RESET} "
-        f"Train the sparse gp with method {sparse_method} "
-        f"and normalization is {normalize_y}\n"
+        f"\n{Fore.BLUE}[INFO]:{Fore.RESET} "
+        f"Train the sparse gp with method {config.method} "
+        f"and normalization is {config.normalize_y}\n"
     )
 
     features, responses = get_pre_processed_data(
-        param_set["train_data_number"],
-        param_set["input_window"],
-        param_set["train_file_path"],
-        param_set["gap_window"],
+        config.train_data_number,
+        config.input_window,
+        config.train_file_path,
+        config.gap_window,
         select=select_index,
     )[:2]
     responses = responses[:, output_id]
 
     input_dim = 4 * (
-        param_set["input_window"] - param_set["gap_window"]
+        config.input_window - config.gap_window
     )
     kernel = _create_sparse_kernel(input_dim)
 
@@ -384,23 +375,23 @@ def Sparse_GPy_test(
         features,
         responses.reshape(-1, 1),
         kernel=kernel,
-        normalizer=normalize_y,
-        num_inducing=param_set["num_inducing"],
+        normalizer=config.normalize_y,
+        num_inducing=config.num_inducing,
     )
 
-    if sparse_method == "FITC":
+    if config.method == "FITC":
         model.inference_method = GPy.inference.latent_function_inference.FITC()
         model.parameters_changed()
 
-    if optimize:
+    if config.optimize:
         model.optimize_restarts(num_restarts=10, verbose=False)
 
-    if print_enable:
+    if config.print:
         test_features, test_responses = get_pre_processed_data(
-            param_set["test_data_number"],
-            param_set["input_window"],
-            param_set["test_file_path"],
-            param_set["gap_window"],
+            config.test_data_number,
+            config.input_window,
+            config.test_file_path,
+            config.gap_window,
             select=select_index,
         )[:2]
         test_responses = test_responses[:, output_id]
@@ -423,25 +414,25 @@ def Sparse_GPy_test(
             sparse=True,
         )
 
-        if plot_enable:
+        if config.plot:
             _plot_predictions(prediction, test_responses, uncertainty)
 
-    if write_data:
-        file_path = param_set["fixed_data_path"]
+    if config.write_data:
+        file_path = config.fixed_data_path
 
         with open(file_path, "a") as file:
-            for inducing_input in model.inducing_inputs[: param_set["num_inducing"]]:
+            for inducing_input in model.inducing_inputs[: config.num_inducing]:
                 file.write(" ".join(map(str, inducing_input)) + "\n")
 
 
-def write_train_data(param_set: dict[str, Any]):
-    file_path = param_set["fixed_data_path"]
+def write_train_data(config: TrainConfig) -> None:
+    file_path = config.fixed_data_path
 
     features, responses = get_pre_processed_data(
-        param_set["train_data_number"],
-        param_set["input_window"],
-        param_set["train_file_path"],
-        param_set["gap_window"],
+        config.train_data_number,
+        config.input_window,
+        config.train_file_path,
+        config.gap_window,
     )[:2]
 
     with open(file_path, "w") as file:
@@ -449,3 +440,15 @@ def write_train_data(param_set: dict[str, Any]):
             feature_string = " ".join(map(str, feature_row))
             response_string = " ".join(map(str, response_row))
             file.write(f"{feature_string} {response_string}\n")
+
+def test_train_gp():
+    config_file_path = "config/train/train.yaml"
+    config = TrainConfig.from_yaml(config_file_path)
+
+    test = GPy_test if config.method == "Exact" else Sparse_GPy_test
+
+    if config.write_data:
+        write_train_data(config)
+        
+    test(config, output_id = 0)
+    test(config, output_id = 1)

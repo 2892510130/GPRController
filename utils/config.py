@@ -199,3 +199,27 @@ class Config:
     def __post_init__(self):
         if hasattr(self.mpc, "control_dt") and np.abs(self.mpc.control_dt - self.sim.control_dt) > 1e-6:
             raise ValueError("control dt should be same in sim and mpc!")
+
+@dataclass
+class TrainConfig:
+    plot:              bool
+    print:             bool
+    write_data:        bool
+    optimize:          bool
+    normalize_y:       bool
+    train_data_number: int
+    test_data_number:  int
+    input_window:      int
+    gap_window:        int
+    num_inducing:      int
+    method:            str
+    train_file_path:   str
+    test_file_path:    str
+    fixed_data_path:   str
+
+    @classmethod
+    def from_yaml(cls, file_path: str):
+        with open(file_path, 'r') as f:
+            data = yaml.safe_load(f)
+
+        return cls(**data)
