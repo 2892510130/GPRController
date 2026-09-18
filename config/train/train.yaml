@@ -1,14 +1,14 @@
 plot:              false
 print:             true
-write_data:        false
+write_data:        true
 normalize_y:       false
-optimize:          false
+optimize:          true
 train_data_number: 4000
 test_data_number:  1000
 input_window:      3
 gap_window:        0
 num_inducing:      40
-method:            "DTC"
-train_file_path:   "log/gpr_log/test.txt"
-test_file_path:    "log/gpr_log/test.txt"
-fixed_data_path:   "log/processed_data/test.txt"
+method:            "FITC" # FITC DTC Exact
+train_file_path:   "log/gpr_log/linear_mpc_frenet.txt"
+test_file_path:    "log/gpr_log/linear_mpc_frenet.txt"
+fixed_data_path:   "log/processed_data/linear_mpc_frenet.txt"

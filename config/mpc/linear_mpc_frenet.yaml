@@ -7,9 +7,6 @@ mpc:
   mpc_dt:                0.05
   control_dt:            0.05 # duplicated with sim as I do not want to change the code yet
           
-  # Q:                     [0.0001, 0.0001, 0.0001, 0.0001, 0, 0, 0, 0, 0, 0, 0, 0]
-  # Q_final:               [0.0001, 0.0001, 0.0001, 0.0001, 0, 0, 0, 0, 0, 0, 0, 0]
-  # R:                     [0.0001, 0.0001]
   Q:                     [100, 10, 100, 1, 0, 0, 0, 0, 0, 0, 0, 0]
   Q_final:               [200, 20, 200, 2, 0, 0, 0, 0, 0, 0, 0, 0]
   R:                     [0.2, 0.2]
@@ -21,7 +18,7 @@ mpc:
   linear_method:         1
      
   print_time:            false
-  propagete_cov:         false
+  propagete_cov:         true
   linearized:            true
   variance_aware:        false
   aware_len:             40
@@ -31,37 +28,37 @@ mpc:
   record_data_path:      "log/gpr_log/linear_mpc_frenet.txt"
  
 gaussian: 
-  path:                  "log/processed_data/modest.txt" # delay3[152] delay3n[197] bad_wheel[197]
+  path:                  "log/processed_data/linear_mpc_frenet.txt" # delay3[152] delay3n[197] bad_wheel[197]
   save_path:             "log/save"
   load_path:             "log/save"
-  total_data_number:     140                # 398 for the show update
+  total_data_number:     396                # 398 for the show update
   inducing_data_number:  40
   input_window:          3
-  gpr_method:            3
-  sparse_method:         2
+  gpr_method:            1
+  sparse_method:         3
   normalize_y:           false
   lagacy:                false
   enable_test:           false
-  update_mu_su:          true
-  add_mu_su:             true
+  update_mu_su:          false
+  add_mu_su:             false
   threshold:             0.95
   read_model:            false
-  # params:               
-  #   - [1.3733700516848135e-13, 4.017731268400519, 2.2351591630664065, 2.3702370101707326, 4.516115026356124, 6.7981568993319, 1.3704008211664125, 1.3989203209588328, 7.105669989729426, 7.205950599193166, 0.7232925668954272, 1.0717124999119672, 8.067745155439416, 6.520483182308575]
-  #   - [5.825322471811277e-15, 1.1896101098604543, 0.3949284170268133, 17.393734996731858, 2.0348182671261075, 1.53383658257492, 33.786819847661405, 8.304372186300899, 22.81120521396443, 12.697887681309254, 5.699994290862615, 4.357139851344008, 5.04729054482422, 3.6332253213585513]
   params:               
-    - [1.3733700516848135e-13, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
-    - [5.825322471811277e-15, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    - [2.487914036379907e-28, 5.75609969907262, 0.5525860655378508, 3.3592493546064155, 5.769784434844389, 9.917590314108525, 3.1652788074089977, 4.3255826599057725, 8.160062600942952, 9.229041654498461, 0.44291683527385173, 2.5344888585559042, 7.794032140360033, 9.686738681389556]
+    - [1.0287458904287608e-23, 7.801078533675793, 4.274879375466691, 0.5696872655328417, 10.431960099964881, 4.026722530016197, 5.060096984108449, 3.614657439045324, 8.459952277564215, 8.882957912228656, 5.169043384574253, 0.662775101629792, 9.0756509272653, 9.531791925324391]
+  # params:               
+  #   - [1.6520400630881438e-19, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+  #   - [7.192709472743391e-13, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
  
 sim: 
   sim_model:             "Kinematic Cartesian Delay"
-  SIM_TIMES:             120
+  SIM_TIMES:             400
   noise_scale:           1
   delay_window:          1 # 3
   start_index:           0
 
   bad_wheel:             true
-  wheel_left:            0.975
+  wheel_left:            0.975 # This digit can show the advantage of first-order gpr
   wheel_right:           1.00
   L:                     0.5
          
@@ -71,7 +68,7 @@ sim:
   filter_feq_v:          25.0
   filter_feq_w:          25.0
           
-  add_noise:             false
+  add_noise:             true
   add_filter:            false
   add_clamp:             true
           

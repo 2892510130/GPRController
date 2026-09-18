@@ -26,6 +26,7 @@ class MPCPlotter:
         
     def setup_animation_plot(self, sim_runner):
         """Initialize the real-time animation plot"""
+
         self.fig, self.ax = plt.subplots()
         
         # Static reference path
@@ -99,7 +100,7 @@ class MPCPlotter:
         self.dynamic_square.set_xy((lb_x, lb_y))
         self.dynamic_square.angle = np.degrees(theta)
 
-        if sim_runner.mpc.opts.propagete_cov:
+        if sim_runner.mpc.opts.propagete_cov and sim_runner.mpc.gaussian_dict.gpr_method >= 0:
             var_list = sim_runner.mpc.x_var_list
             for i in range(sim_runner.mpc.opts.mpcWindow):
                 var = var_list[i]
@@ -285,6 +286,17 @@ class SimulationRunner:
         self.frame_cnt += 1
 
         return new_state
+
+    def run_full_simulation(self):
+        """Headless: 只跑仿真，不做任何绘图"""
+        current_state = self.get_initial_state()
+        for _ in range(self.get_simulation_frames()):
+            if self.simulation_finished:
+                print(f"[Simulation] Simulation terminated: {self.termination_reason}")
+                break
+            current_state = self.run_step(current_state)
+        self.mpc.logger.close_log()
+        return current_state
     
     def get_simulation_frames(self):
         """Get the number of simulation frames"""
@@ -294,7 +306,7 @@ class SimulationRunner:
         """Get the initial simulation state"""
         return self.sim_x0
     
-def test_mpc_closed_loop(): 
+def test_mpc_closed_loop(visualize: int = 0): 
     plt.rcParams.update({
         "lines.linewidth": 2,
         "axes.linewidth": 1.5,
@@ -323,8 +335,9 @@ def test_mpc_closed_loop():
 
     # --------------- Create trajectory and mpc controller --------------- #
     # bezier_path = BezierPath(path_config)
-    # bezier_path = RacePath(path_config, "config/track/l4acados_track.yaml")
-    bezier_path = Trajectory("config/track/1-10.yaml")
+    # bezier_path = RacePath("config/track/race_opt.yaml")
+    # bezier_path = Trajectory("config/track/1-10.yaml")
+    bezier_path = Trajectory("config/track/full_track_opt.yaml")
     mpc = MPCList[config.mpc.mpc_name](
         config, 
         bezier_path.path, 
@@ -334,29 +347,33 @@ def test_mpc_closed_loop():
     # --------------- Initialize simulation and plotting --------------- #
     sim_runner = SimulationRunner(mpc, config)
     plotter = MPCPlotter(bezier_path)
-    fig, ax = plotter.setup_animation_plot(sim_runner)
 
-    # Get initial state from the runner
-    current_state = sim_runner.get_initial_state()
+    if visualize >= 2:
+        fig, ax = plotter.setup_animation_plot(sim_runner)
 
-    # --------------- Animation update function --------------- #
-    def update(frame):
-        nonlocal current_state
-        if sim_runner.simulation_finished:
-            print(f"[Simulation] Simulation terminated: {sim_runner.termination_reason}")
-            ani.event_source.stop()
-            sim_runner.mpc.logger.close_log()
+        # Get initial state from the runner
+        current_state = sim_runner.get_initial_state()
+
+        # --------------- Animation update function --------------- #
+        def update(frame):
+            nonlocal current_state
+            if sim_runner.simulation_finished:
+                print(f"[Simulation] Simulation terminated: {sim_runner.termination_reason}")
+                ani.event_source.stop()
+                sim_runner.mpc.logger.close_log()
+                return plotter.update_animation(sim_runner, current_state)
+            current_state = sim_runner.run_step(current_state)
             return plotter.update_animation(sim_runner, current_state)
-        current_state = sim_runner.run_step(current_state)
-        return plotter.update_animation(sim_runner, current_state)
-    
-    # --------------- Run animation --------------- #
-    ani = FuncAnimation(
-        fig, update, 
-        frames=sim_runner.get_simulation_frames(),
-        interval=20, blit=True, repeat=False
-    )
-    plt.show()
+        
+        # --------------- Run animation --------------- #
+        ani = FuncAnimation(
+            fig, update, 
+            frames=sim_runner.get_simulation_frames(),
+            interval=20, blit=True, repeat=False
+        )
+        plt.show()
+    else:
+        sim_runner.run_full_simulation()
 
     # --------------- Generate analysis plots --------------- #
     # Convert lists to arrays
@@ -367,10 +384,11 @@ def test_mpc_closed_loop():
     plotter.print_performance_summary(state)
     
     # Create time vector and analysis plots
-    time = np.linspace(0, sim_path.shape[0] * sim_runner.dt, sim_path.shape[0])
-    analysis_fig, analysis_axs = plotter.create_analysis_plots(
-        time, sim_path, ref, control, state, mpc.model, sim_runner.sim_model
-    )
-    plt.show()
+    if visualize >= 1:
+        time = np.linspace(0, sim_path.shape[0] * sim_runner.dt, sim_path.shape[0])
+        analysis_fig, analysis_axs = plotter.create_analysis_plots(
+            time, sim_path, ref, control, state, mpc.model, sim_runner.sim_model
+        )
+        plt.show()
 
     sim_runner.mpc.save_model()

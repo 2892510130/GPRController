@@ -111,140 +111,90 @@ class NonlinearTrajectoryOptimizer:
         self.traj[:, 2] = speed_profile[:, 3]
         self.traj[:, 3] = path[:, 3]
 
-class TrajectoryOptimizer:
-    def __init__(self, config: SpeedOptimizerConfig, traj: np.ndarray = None) -> None:
-        """
-        Optimize the trajectory to better fit vehicle dynamics
-            traj: (n, 4) shape, each row is (arclength, vel, acc, curvature)
-        """
-        self.config = config
-        self.traj = traj
+def test_nonliner_speed_optimize():
+    import yaml
+    from .bezier import BezierPath
+    import matplotlib.pyplot as plt
+    from utils.angle import convert_angle, normalize_angle
 
-    def initialize(self) -> None:
-        self.dt = self.config.dt
-        self.number_of_points = self.traj.shape[0]
-        self.number_of_constraints = 3 * self.number_of_points - 3
-        self.gradient = np.zeros((self.number_of_points * 3,))
-        self.Hessian = np.zeros((self.number_of_points * 3, self.number_of_points * 3))
-        self.constraint = np.zeros((self.number_of_constraints, self.number_of_points * 3))
-        self.lower_bound_x = np.zeros((self.number_of_points * 3,))
-        self.upper_bound_x = np.zeros((self.number_of_points * 3,))
-        self.lower_bound_a = np.zeros((self.number_of_constraints,))
-        self.upper_bound_a = np.zeros((self.number_of_constraints,))
+    config = TrajectoryConfig.from_yaml("config/track/bezier_path.yaml")
+    rc_path = BezierPath(config)
 
-        self.penalty_curv = np.abs(self.traj[:, 3]) * self.config.w_cur
+    # config = TrajectoryConfig.from_yaml("config/track/full_track_config.yaml")
+    # rc_path = Trajectory("config/track/full_track.yaml")
+    sp = SpeedOptimizerConfig.from_yaml("config/speed_optimizer/bezier.yaml")
 
-    def setup_problem(self) -> None:
-        scale = self.config.scale
-        dt, dt_square = self.dt, self.dt ** 2
-        w_s, w_v, w_a, w_j = self.config.w_s, self.config.w_v, self.config.w_a, self.config.w_j
-        v_m, a_m, j_m = self.config.v_m, self.config.a_m, self.config.j_m
-        w_s_e, w_v_e, w_a_e = self.config.w_s_e, self.config.w_v_e, self.config.w_a_e
-        s_e, v_e, a_e = self.traj[-1, 0], 0, 0
+    optimizer = NonlinearTrajectoryOptimizer(sp, traj_config=config)
+    optimizer.set_traj_with_bezier(rc_path.path, rc_path.speed_profile)
+    sol = optimizer.solve()
+    dt = sp.dt
 
-        for i in range(self.number_of_points):
-            self.gradient[i] = -1 * w_s * self.traj[i, 0] / scale[0]
-            self.gradient[self.number_of_points + i] = -1 * w_v * self.traj[i, 1] / scale[1]
-            # self.gradient[self.number_of_points * 2 + i] = -1 * w_a * self.traj[i, 2] / scale[2] # original paper do not minimize between a and a_ref
+    k_s = np.array(optimizer.curv_func(sol[:, 0]))
+    sampled_k = resample(rc_path.path[:, 3], rc_path.speed_profile[:, 1], sol[:, 0])
+    w_opt = sol[:, 1] * k_s.squeeze()
+    dw = (w_opt[1:] - w_opt[:-1]) / sp.dt
+    print(dw.shape)
+    dk = (k_s[1:] - k_s[:-1]) / config.sample_dt
+    dw_opt = np.concatenate((np.array([config.start_a * float(k_s[0]) + config.start_v * float(dk[0])]), dw))
+    dw_2 = sol[:, 2] * k_s.squeeze() + sol[:, 1] * np.concatenate((dk.squeeze(), np.array([float(dk[-1])])))
 
-            self.Hessian[i, i] = self.config.w_s / (scale[0] * scale[0]) 
-            self.Hessian[self.number_of_points + i, self.number_of_points + i] = (w_v + self.penalty_curv[i]) / (scale[1] * scale[1]) 
-            self.Hessian[2 * self.number_of_points + i, 2 * self.number_of_points + i] = (w_a + 2 * w_j / dt_square) / (scale[2] * scale[2]) 
+    fig, ax = plt.subplots(2, 2)
+    ax[0, 0].plot(rc_path.speed_profile[:, 0], rc_path.speed_profile[:, 2], label="v")
+    ax[0, 0].plot(rc_path.speed_profile[:, 0], sol[:, 1], label="v_opt")
+    ax[0, 0].plot(rc_path.speed_profile[:, 0], rc_path.speed_profile[:, 4], label="w")
+    ax[0, 0].plot(rc_path.speed_profile[:, 0], w_opt, label="w_opt")
+    ax[0, 0].plot(rc_path.speed_profile[:, 0], k_s / np.max(k_s), label="k")
+    ax[0, 0].legend()
+    ax[0, 0].set_title("Speed Profile")
 
-            self.lower_bound_x[i] = 0 * scale[0]
-            self.lower_bound_x[self.number_of_points + i] = 0 * scale[1] # -v_m * scale[1]
-            self.lower_bound_x[self.number_of_points * 2 + i] = -a_m * scale[2]
+    ax[1, 0].plot(rc_path.speed_profile[:, 0], rc_path.speed_profile[:, 3], label="a")
+    ax[1, 0].plot(rc_path.speed_profile[:, 0], rc_path.speed_profile[:, 5], label="a_w")
+    ax[1, 0].plot(rc_path.speed_profile[:, 0], sol[:, 2], label="a_opt")
+    ax[1, 0].plot(rc_path.speed_profile[:, 0], dw_opt, label="a_w_opt")
+    ax[1, 0].plot(rc_path.speed_profile[:, 0], dw_2, label="a_w_opt_2")
+    ax[1, 0].legend()
+    ax[1, 0].set_title("Acc Profile")
 
-            self.upper_bound_x[i] = s_e * scale[0]
-            self.upper_bound_x[self.number_of_points + i] = v_m * scale[1]
-            self.upper_bound_x[self.number_of_points * 2 + i] = a_m * scale[2]
+    ax[0, 1].plot(rc_path.speed_profile[:, 0], rc_path.speed_profile[:, 1], label="s")
+    ax[0, 1].plot(rc_path.speed_profile[:, 0], sol[:, 0], label="s_opt")
+    ax[0, 1].legend()
+    ax[0, 1].set_title("Arc Profile")
 
-            # all about linear constraints
-            if i < self.number_of_points - 1:
-                # Dynamic of arclength: [s(i+1) - s(i)] / dt = Vel * dt + Acc * dt^2 / 2 + Jerk * dt^3 / 6
-                # where Jerk is given by [s(i+1)'' - s(i)''] / dt
-                self.constraint[i, i] = -1 * scale[1] * scale[2]
-                self.constraint[i, i + 1] = 1 * scale[1] * scale[2]
-                self.constraint[i, self.number_of_points + i] = -dt * scale[0] * scale[2]
-                self.constraint[i, self.number_of_points * 2 + i] = -dt_square * scale[0] * scale[1] / 3
-                self.constraint[i, self.number_of_points * 2 + 1 + i] = -dt_square * scale[0] * scale[1] / 6
+    ax[1, 1].plot(rc_path.speed_profile[:-1, 0], (rc_path.speed_profile[1:, 3] - rc_path.speed_profile[:-1, 3]) / dt, label="j")
+    ax[1, 1].plot(rc_path.speed_profile[:-1, 0], (sol[1:, 2] - sol[:-1, 2]) / dt, label="j_opt")
+    ax[1, 1].legend()
+    ax[1, 1].set_title("Jerk Profile")
 
-                # Dynamic between speed and acceleration: [s(i+1)' - s(i)'] / dt = Acc * dt + Jerk * dt^2 / 2
-                # where Jerk is given by [s(i+1)'' - s(i)''] / dt
-                self.constraint[self.number_of_points - 1 + i, self.number_of_points + i] = -1 * scale[2]
-                self.constraint[self.number_of_points - 1 + i, self.number_of_points + 1 + i] = 1 * scale[2]
-                self.constraint[self.number_of_points - 1 + i, self.number_of_points * 2 + i] = -dt * scale[1] / 2
-                self.constraint[self.number_of_points - 1 + i, self.number_of_points * 2 + 1 + i] = -dt * scale[1] / 2
+    fig2, ax2 = plt.subplots(1, 2)
+    ax2[0].plot(rc_path.speed_profile[:, 0], rc_path.speed_profile[:, 1], label="s")
+    ax2[0].plot(rc_path.speed_profile[:, 0], rc_path.speed_profile[:, 2], label="v")
+    ax2[0].plot(rc_path.speed_profile[:, 0], rc_path.speed_profile[:, 3], label="a")
+    ax2[0].plot(rc_path.speed_profile[:, 0], rc_path.path[:, 3] / np.max(rc_path.path[:, 3]), label="k")
+    ax2[0].legend()
+    ax2[0].set_title("Speed Profile")
 
-                self.Hessian[2 * self.number_of_points + i, 2 * self.number_of_points + i + 1] = (-w_j / dt_square) / (scale[2] * scale[2])
-                self.Hessian[2 * self.number_of_points + i + 1, 2 * self.number_of_points + i] = (-w_j / dt_square) / (scale[2] * scale[2])
+    ax2[1].plot(rc_path.speed_profile[:, 0], sol[:, 0], label="s")
+    ax2[1].plot(rc_path.speed_profile[:, 0], sol[:, 1], label="v")
+    ax2[1].plot(rc_path.speed_profile[:, 0], sol[:, 2], label="a")
+    ax2[1].plot(rc_path.speed_profile[:, 0], k_s / np.max(k_s), label="k")
+    ax2[1].plot(rc_path.speed_profile[:, 0], sampled_k / np.max(sampled_k), label="sampled_k")
+    ax2[1].legend()
+    ax2[1].set_title("Speed Profile Optimized")
 
-                # Constraint on the jerk: -Jerk_max * dt <= s(i+1)'' - s(i)'' <= Jerk_max * dt
-                self.constraint[self.number_of_points * 2 - 2 + i, self.number_of_points * 2 + i] = -1
-                self.constraint[self.number_of_points * 2 - 2 + i, self.number_of_points * 2 + 1 + i] = 1
-                self.lower_bound_a[self.number_of_points * 2 - 2 + i] = -j_m * dt * scale[2]
-                self.upper_bound_a[self.number_of_points * 2 - 2 + i] = j_m * dt * scale[2]
+    plt.show()
 
-        self.gradient[self.number_of_points - 1] -= 1 * w_s_e * s_e / scale[0]
-        self.gradient[2 * self.number_of_points - 1] -= 1 * w_v_e * v_e / scale[1]
-        self.gradient[3 * self.number_of_points - 1] -= 1 * w_a_e * a_e / scale[2]
+    convert_angle(rc_path.path[:, 2])
+    optimized_data = {}
+    optimized_data["x"]         = resample(rc_path.path[:, 0], rc_path.speed_profile[:, 1], sol[:, 0]).tolist()
+    optimized_data["y"]         = resample(rc_path.path[:, 1], rc_path.speed_profile[:, 1], sol[:, 0]).tolist()
+    optimized_data["yaw"]       = resample(rc_path.path[:, 2], rc_path.speed_profile[:, 1], sol[:, 0]).tolist()
+    optimized_data["curvature"] = np.array(k_s).squeeze().tolist()
+    optimized_data["arcLength"] = sol[:, 0].tolist()
+    optimized_data["vel"]       = sol[:, 1].tolist()
+    optimized_data["acc"]       = sol[:, 2].tolist()
+    optimized_data["time"]      = rc_path.speed_profile[:, 0].tolist()
+    optimized_data["omega"]     = w_opt.tolist()
+    optimized_data["acc_omega"] = dw_2.tolist()
 
-        self.Hessian[2 * self.number_of_points, 2 * self.number_of_points] -= (w_j / dt_square) / (scale[2] * scale[2])
-
-        # we may not need this as it is hard constraint below
-        # self.Hessian[self.number_of_points - 1, self.number_of_points - 1] += w_s_e / (scale[0] * scale[0])
-        # self.Hessian[2 * self.number_of_points - 1, 2 * self.number_of_points - 1] += w_v_e / (scale[1] * scale[1])
-        # self.Hessian[3 * self.number_of_points - 1, 3 * self.number_of_points - 1] += (w_a_e -  w_j / dt_square) / (scale[2] * scale[2])
-
-        self.upper_bound_x[0] = 0
-        self.lower_bound_x[0] = 0
-        self.lower_bound_x[self.number_of_points] = self.traj[0, 1] * scale[1]
-        self.upper_bound_x[self.number_of_points] = self.traj[0, 1] * scale[1]
-        self.lower_bound_x[2 * self.number_of_points] = self.traj[0, 2] * scale[2]
-        self.upper_bound_x[2 * self.number_of_points] = self.traj[0, 2] * scale[2]
-
-        self.upper_bound_x[self.number_of_points - 1] = s_e * scale[0]
-        self.lower_bound_x[self.number_of_points - 1] = s_e * scale[0]
-        self.lower_bound_x[2 * self.number_of_points - 1] = v_e * scale[1]
-        self.upper_bound_x[2 * self.number_of_points - 1] = v_e * scale[1]
-        self.lower_bound_x[3 * self.number_of_points - 1] = a_e * scale[2]
-        self.upper_bound_x[3 * self.number_of_points - 1] = a_e * scale[2]
-
-    def solve(self) -> np.ndarray:
-        self.initialize()
-        self.setup_problem()
-
-        self.H_casadi = ca.DM(self.Hessian)
-        self.linearMatrix_casadi = ca.DM(self.constraint)
-
-        qp = {"h" : self.H_casadi.sparsity(), "a" : self.linearMatrix_casadi.sparsity()}
-        opts = {"error_on_fail": True, "osqp.verbose": 0, "print_time": True}
-        solver = ca.conic("SpeedOptimizer", "osqp", qp, opts) # osqp, qpoases
-        args = {
-            "h"   : self.H_casadi,
-            "g"   : self.gradient,
-            "lbx" : self.lower_bound_x,
-            "ubx" : self.upper_bound_x,
-            "a"   : self.constraint,
-            "lba" : self.lower_bound_a,
-            "uba" : self.upper_bound_a,
-        }
-        solution = solver(**args)
-        return np.array(solution["x"]).reshape(-1, 3, order="F")
-
-    def set_traj_with_bezier(self, path: np.ndarray, speed_profile: np.ndarray) -> None:
-        self.traj = np.zeros((path.shape[0], 4))
-        self.traj[:, 0] = speed_profile[:, 1]
-        self.traj[:, 1] = speed_profile[:, 2]
-        self.traj[:, 2] = speed_profile[:, 3]
-        self.traj[:, 3] = path[:, 3]
-
-    def solve_iteratively(self, iters: int = 3) -> np.ndarray:
-        sol = self.solve()
-        for i in range(iters - 1):
-            self.traj[:, 3] = resample(self.traj[:, 3], self.traj[:, 0], sol[:, 0])
-            self.traj[:, 0] = sol[:, 0]
-            self.traj[:, 1] = sol[:, 1]
-            self.traj[:, 2] = sol[:, 2]
-            sol = self.solve()
-        return sol
+    with open('config/track/opt_track.yaml', 'w') as f:
+        yaml.dump(optimized_data, f)

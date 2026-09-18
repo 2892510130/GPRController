@@ -175,7 +175,7 @@ class SimulationRunner:
         self.user_input = 1
         self.index = 0
         self.pre_run_steps = 10000
-        self.interrupt_mode = True
+        self.interrupt_mode = False
 
     def check_termination_conditions(self, current_state):
         """Check if simulation should terminate"""
@@ -261,11 +261,10 @@ class SimulationRunner:
 
             # Apply bad wheel simulation
             if self.sim_config.bad_wheel:
-                self.bad_wheel_simulation(control_buffer_tmp[0])
-                print("Note that the i==0 record maybe not correct")
+                self.bad_wheel_simulation(control_buffer_tmp[0]) # Note that the i==0 record maybe not correct
             
             # Integrate dynamics
-            x0_tmp = np.array(self.sim_model.integrate(x0_tmp, control_buffer_tmp[0])["xf"])
+            x0_tmp = self.sim_model.integrate(x0_tmp, control_buffer_tmp[0])
             
             # Add noise
             if self.sim_config.add_noise:
@@ -326,6 +325,7 @@ def test_mpc():
     # bezier_path = BezierPath(path_config)
     # bezier_path = RacePath(path_config.traj, "config/track/l4acados_track.yaml")
     bezier_path = Trajectory("config/track/full_track_opt.yaml")
+    # bezier_path = Trajectory("config/track/1-10.yaml")
     mpc = MPCList[config.mpc.mpc_name](
         config, 
         bezier_path.path, 

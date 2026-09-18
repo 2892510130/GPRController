@@ -177,10 +177,10 @@ class AugmentedFrenetGaussianModel(ModelInterface):
             self.A[3, 2:2+2*self.input_window] += self.dmu_dw[mask].squeeze()
             self.A[2, 2+2*self.input_window:]  += self.dmu_dv[~mask2].squeeze()
             self.A[3, 2+2*self.input_window:]  += self.dmu_dw[~mask2].squeeze()
-            self.B[2, :]  += self.dmu_dv[2:4].squeeze()
-            self.B[3, :]  += self.dmu_dw[2:4].squeeze()
-            self.C[2]     -= (gpr_input @ self.dmu_dv).squeeze()
-            self.C[3]     -= (gpr_input @ self.dmu_dw).squeeze()
+            self.B[2, :] += self.dmu_dv[2:4].squeeze()
+            self.B[3, :] += self.dmu_dw[2:4].squeeze()
+            self.C[2]    -= (gpr_input @ self.dmu_dv).squeeze()
+            self.C[3]    -= (gpr_input @ self.dmu_dw).squeeze()
 
             if compute_dvar_dx is True:
                 self.compute_variance_aware(mask, mask2)

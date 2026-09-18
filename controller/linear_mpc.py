@@ -153,7 +153,7 @@ class LinearMPC:
                 else:
                     self.update_gpr(i, nx, nu)
 
-                if self.opts.propagete_cov:
+                if self.opts.propagete_cov and self.gaussian_dict.gpr_method >= 0:
                     self.x_var = self.model.create_discrete_model(
                         dt, 
                         self.gpr_input_tmp, 
@@ -480,7 +480,7 @@ class LinearMPC:
         if self.opts.variance_aware:
             pass
         
-        self.logger.empty_line(3)
+        self.logger.empty_line(2)
     
     def save_model(self):
         if self.gaussian_dict.sparse_method == 2 or self.gaussian_dict.sparse_method == 3:

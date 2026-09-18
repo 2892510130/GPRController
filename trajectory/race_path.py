@@ -20,7 +20,6 @@ class RacePath:
             self.curvature = self.track["curvature"][:length]
             self.yaw = self.track["tangentAngle"][:length]
 
-        
         self.resample()
 
     def resample(self) -> None:
