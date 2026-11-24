@@ -451,7 +451,7 @@ class SparseFITCGP:
         self.diag_inv = np.hstack((self.diag_inv, diag_inv_new))
 
         W_d_inv_y_new = (W_new * diag_inv_new) @ Y_new
-        self.W_d_inv_y += W_d_inv_y_new
+        self.W_d_inv_y += W_d_inv_y_new.reshape(self.W_d_inv_y.shape)
         
         self.L_updated = False
 
@@ -915,7 +915,7 @@ class SparseDTCGP:
         self.W = np.hstack((self.W, W_new))
 
         W_d_inv_y_new = 1.0 / self.variance * W_new @ Y_new
-        self.W_d_inv_y += W_d_inv_y_new
+        self.W_d_inv_y += W_d_inv_y_new.reshape(self.W_d_inv_y.shape)
         
         self.L_updated = False
 

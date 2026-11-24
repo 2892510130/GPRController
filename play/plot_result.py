@@ -41,6 +41,8 @@ def plot_delta_state(lines):
 
     # plt.show()
 
+    return increase_dv, increase_dw
+
 def plot_prediction_offline(lines):
     delta_state_nominal, delta_state, gpr_input = [], [], []
 

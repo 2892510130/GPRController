@@ -6,7 +6,7 @@ from collections import deque
 from matplotlib.animation import FuncAnimation
 from matplotlib.patches import Rectangle, Circle
 from utils.filter import LPFilter
-from utils import Config, TrajectoryConfig
+from utils import Config, TrajectoryConfig, Logger
 from controller import MPCList
 from trajectory import BezierPath, RacePath, Trajectory
 
@@ -306,7 +306,7 @@ class SimulationRunner:
         """Get the initial simulation state"""
         return self.sim_x0
     
-def test_mpc_closed_loop(visualize: int = 0): 
+def test_mpc_closed_loop(visualize: int = 0, config: Config = None) -> Config: 
     plt.rcParams.update({
         "lines.linewidth": 2,
         "axes.linewidth": 1.5,
@@ -320,16 +320,17 @@ def test_mpc_closed_loop(visualize: int = 0):
     })
     
     # --------------- Read the config from yaml --------------- #
-    for (root, dirs, files) in os.walk("config/mpc"):
-        config_list = files
+    if config is None:
+        for (root, dirs, files) in os.walk("config/mpc"):
+            config_list = files
 
-    print("Choose one mpc config to run:")
-    for index, name in enumerate(config_list):
-        print(f" {index:2d}: {name}")
-    
-    user_select = int(input())
-    config_dir = "config/mpc/" + config_list[user_select]
-    config = Config.from_yaml(config_dir)
+        print("Choose one mpc config to run:")
+        for index, name in enumerate(config_list):
+            print(f" {index:2d}: {name}")
+        
+        user_select = int(input())
+        config_dir = "config/mpc/" + config_list[user_select]
+        config = Config.from_yaml(config_dir)
     # path_config = TrajectoryConfig.from_yaml("config/track/bezier_path.yaml")
     # path_config = TrajectoryConfig.from_yaml("config/track/l4acados_config.yaml")
 
@@ -338,6 +339,7 @@ def test_mpc_closed_loop(visualize: int = 0):
     # bezier_path = RacePath("config/track/race_opt.yaml")
     # bezier_path = Trajectory("config/track/1-10.yaml")
     bezier_path = Trajectory("config/track/full_track_opt.yaml")
+
     mpc = MPCList[config.mpc.mpc_name](
         config, 
         bezier_path.path, 
@@ -392,3 +394,5 @@ def test_mpc_closed_loop(visualize: int = 0):
         plt.show()
 
     sim_runner.mpc.save_model()
+
+    return config
