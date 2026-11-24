@@ -1,3 +1,5 @@
+> 详细使用指南、配置说明和测试说明见 [GUIDE.md](GUIDE.md)。
+
 ## How to run?
 
 ### Create a trajectory
