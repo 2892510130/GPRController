@@ -2,7 +2,6 @@ import numpy as np
 
 from model import (
     CartesianModel,
-    CartesianDelayModel
 )
 
 def test_cartesian_model_integration():

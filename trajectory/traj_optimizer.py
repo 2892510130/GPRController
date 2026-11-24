@@ -115,7 +115,7 @@ def test_nonliner_speed_optimize():
     import yaml
     from .bezier import BezierPath
     import matplotlib.pyplot as plt
-    from utils.angle import convert_angle, normalize_angle
+    from utils.angle import convert_angle
 
     config = TrajectoryConfig.from_yaml("config/track/bezier_path.yaml")
     rc_path = BezierPath(config)

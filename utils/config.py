@@ -35,6 +35,7 @@ class MPCConfig:
     # for acados mpc, if true, will use discrete linearlized model
     linearized:            Optional[bool] = None
     add_delta_constraints: Optional[bool] = False
+    log_path:              str = "log/linear_mpc_log.txt"
 
 
     def __post_init__(self):
@@ -176,17 +177,31 @@ class Config:
         with open(file_path, 'r') as f:
             data = yaml.safe_load(f)
 
+        if not isinstance(data, dict):
+            raise ValueError(f"Config file '{file_path}' must contain a mapping")
+
         _fields = {
             "mpc":      MPCConfig,
             "gaussian": GaussianConfig,
             "traj":     TrajectoryConfig,
             "sim":      SimulationConfig
         }
-        
+
+        unknown = sorted(set(data) - set(_fields))
+        if unknown:
+            raise ValueError(
+                f"Unknown config section(s) {unknown} in '{file_path}'; "
+                f"expected any of {sorted(_fields)}"
+            )
+
         config_data = {}
         
         for _name, _class in _fields.items():
             if _name in data:
+                if not isinstance(data[_name], dict):
+                    raise ValueError(
+                        f"Config section '{_name}' in '{file_path}' must be a mapping"
+                    )
                 config_data[_name] = _class(**data[_name])
         
         # Add any top-level fields

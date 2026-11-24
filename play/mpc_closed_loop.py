@@ -6,9 +6,9 @@ from collections import deque
 from matplotlib.animation import FuncAnimation
 from matplotlib.patches import Rectangle, Circle
 from utils.filter import LPFilter
-from utils import Config, TrajectoryConfig, Logger
+from utils import Config
 from controller import MPCList
-from trajectory import BezierPath, RacePath, Trajectory
+from trajectory import Trajectory
 
 class MPCPlotter:
     """Handles all plotting functionality for MPC simulation"""
@@ -185,6 +185,20 @@ class SimulationRunner:
             Q=sim_noise
         )
         self.sim_x0 = self.sim_config.sim_x0[:self.sim_model.nx]
+
+        start_index = int(self.sim_config.start_index)
+        if start_index != 0:
+            if self.sim_model.nx < 5 or "Cartesian" not in self.sim_model.name:
+                raise ValueError(
+                    "sim.start_index requires a Cartesian simulation model "
+                    f"with at least 5 states, got '{self.sim_model.name}'"
+                )
+            index = min(max(start_index, 0), len(self.mpc.path) - 1)
+            self.sim_x0[0, 0] = self.mpc.path[index, 0]
+            self.sim_x0[1, 0] = self.mpc.path[index, 1]
+            self.sim_x0[2, 0] = self.mpc.path[index, 2]
+            self.sim_x0[3, 0] = self.mpc.speed_profile[index, 2]
+            self.sim_x0[4, 0] = self.mpc.speed_profile[index, 4]
         
         if "Delay" in self.sim_model.name: 
             print("[Simulation]: Using delay model")
@@ -331,13 +345,8 @@ def test_mpc_closed_loop(visualize: int = 0, config: Config = None) -> Config:
         user_select = int(input())
         config_dir = "config/mpc/" + config_list[user_select]
         config = Config.from_yaml(config_dir)
-    # path_config = TrajectoryConfig.from_yaml("config/track/bezier_path.yaml")
-    # path_config = TrajectoryConfig.from_yaml("config/track/l4acados_config.yaml")
 
     # --------------- Create trajectory and mpc controller --------------- #
-    # bezier_path = BezierPath(path_config)
-    # bezier_path = RacePath("config/track/race_opt.yaml")
-    # bezier_path = Trajectory("config/track/1-10.yaml")
     bezier_path = Trajectory("config/track/full_track_opt.yaml")
 
     mpc = MPCList[config.mpc.mpc_name](

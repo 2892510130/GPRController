@@ -2,7 +2,7 @@ import re
 import os
 import GPy
 import numpy as np
-import casadi as ca
+from scipy.linalg import solve_triangular
 from typing import Tuple
 
 from utils import GaussianConfig
@@ -24,6 +24,54 @@ class Normalizer:
 
 _MODEL_FORMAT_VERSION = 2
 _NPZ_MAGIC = b"PK\x03\x04"
+
+
+def _is_rbf_kernel(kern) -> bool:
+    return isinstance(kern, GPy.kern.RBF)
+
+
+def _rbf_parameters(kern):
+    variance = float(np.asarray(kern.variance).reshape(-1)[0])
+    lengthscales = np.asarray(kern.lengthscale, dtype=float).reshape(-1)
+    if lengthscales.size == 1:
+        lengthscales = np.full(kern.input_dim, float(lengthscales[0]))
+    return variance, lengthscales
+
+
+def _kern_K(kern, X1, X2=None) -> np.ndarray:
+    """RBF kernel matrix (numpy implementation; falls back to GPy otherwise)."""
+    if X2 is None:
+        X2 = X1
+    if not _is_rbf_kernel(kern):
+        return kern.K(X1, X2)
+    variance, lengthscales = _rbf_parameters(kern)
+    X1 = np.atleast_2d(X1)
+    X2 = np.atleast_2d(X2)
+    K = np.empty((X1.shape[0], X2.shape[0]))
+    block = 256
+    for start in range(0, X1.shape[0], block):
+        diff = (X1[start:start + block, None, :] - X2[None, :, :]) / lengthscales
+        K[start:start + block] = variance * np.exp(-0.5 * np.sum(diff * diff, axis=-1))
+    return K
+
+
+def _kern_Kdiag(kern, X) -> np.ndarray:
+    if not _is_rbf_kernel(kern):
+        return kern.Kdiag(X)
+    variance, _ = _rbf_parameters(kern)
+    return np.full(np.atleast_2d(X).shape[0], variance)
+
+
+def _rbf_gradient(kern, X1, X2) -> np.ndarray:
+    """dK(X1, X2)/dX2 for an RBF kernel; shape (len(X1), feature_dim)."""
+    variance, lengthscales = _rbf_parameters(kern)
+    X1 = np.atleast_2d(X1)
+    X2 = np.atleast_2d(X2)
+    diff = X1 - X2
+    coefficient = variance * np.exp(
+        -0.5 * np.sum((diff / lengthscales) ** 2, axis=1, keepdims=True)
+    )
+    return coefficient * diff / (lengthscales ** 2)
 
 
 def _is_npz_file(path: str) -> bool:
@@ -230,6 +278,12 @@ class SparseFITCGP:
         self.gaussian_opts = gaussian_opts
         self.cholesky_valid = False
 
+    def _solve_luu(self, rhs: np.ndarray) -> np.ndarray:
+        return solve_triangular(self.Luu, rhs, lower=True)
+
+    def _solve_luu_t(self, rhs: np.ndarray) -> np.ndarray:
+        return solve_triangular(self.Luu.T, rhs, lower=False)
+
     def fit(
         self, 
         X: np.ndarray, 
@@ -257,9 +311,9 @@ class SparseFITCGP:
         self.N = len(self.X)
 
         # Core kernel matrices
-        self.Kuu = self.kern.K(self.U)
+        self.Kuu = _kern_K(self.kern, self.U)
         self.Kuu = (self.Kuu + self.Kuu.T) / 2  # ensure symmetry
-        self.Kuf = self.kern.K(self.U, self.X)
+        self.Kuf = _kern_K(self.kern, self.U, self.X)
 
         # Precompute inverses (with jitter for stability)
         jitter = 1e-6 * np.eye(self.M)
@@ -267,9 +321,9 @@ class SparseFITCGP:
 
         # --- Factorized form ---
         # W = Luu^{-1} Kuf
-        self.W = np.linalg.solve(self.Luu, self.Kuf)
+        self.W = self._solve_luu(self.Kuf)
 
-        self.Kff_diag = self.kern.Kdiag(self.X)
+        self.Kff_diag = _kern_Kdiag(self.kern, self.X)
         # self.Qff_diag = np.diag(self.Kuf.T @ self.Kuu_inv @ self.Kuf)
         self.Qff_diag = np.power(self.W.T, 2).sum(axis=-1)
         self.diag = self.Kff_diag - self.Qff_diag + self.variance
@@ -301,11 +355,11 @@ class SparseFITCGP:
         if from_scratch:
             self.update_L()
 
-            # self.Kuu = self.kern.K(self.U)
+            # self.Kuu = _kern_K(self.kern, self.U)
             # self.Kuu = (self.Kuu + self.Kuu.T) / 2  # ensure symmetry
 
             # self.Kuu_inv = np.linalg.solve(
-            #     self.Luu.T, np.linalg.solve(self.Luu, np.eye(self.M))
+            #     self.Luu.T, self._solve_luu(np.eye(self.M))
             # )
 
             # Posterior covariance Su
@@ -316,20 +370,20 @@ class SparseFITCGP:
             #   = Luu^{-T} L^{-T} L^{-1} Luu^{-1}
             # Su = Kuu @ Sigma @ Kuu = Luu L^{-T} L^{-1} Luu.T = tmp.T @ tmp
             tmp = np.linalg.solve(self.L, self.Luu.T)
-            # tmp = np.linalg.solve(self.L, np.linalg.solve(self.Luu, self.Kuu))
+            # tmp = np.linalg.solve(self.L, self._solve_luu(self.Kuu))
             self.Su = tmp.T @ tmp  # symmetric MxM
 
             # Posterior mean mu
             # mu = Su @ Kuu^{-1} Kuf D^{-1} Y
             # rhs = (self.Kuf * self.diag_inv) @ self.Y
             # self.mu = self.Su @ (self.Kuu_inv @ rhs)
-            rhs = np.linalg.solve(self.Luu, (self.Kuf * self.diag_inv) @ self.Y)
-            self.mu = np.linalg.solve(self.Luu, self.Su.T).T @ rhs
+            rhs = self._solve_luu((self.Kuf * self.diag_inv) @ self.Y)
+            self.mu = self._solve_luu(self.Su.T).T @ rhs
         else:
             # TODO: if new inducing points are too many, then the update will have some error
             # TODO: if new inducing is close to old ones, numerical issues may happen
-            Luu_inv_Kun = np.linalg.solve(self.Luu, Kun)
-            Kuu_inv_kun = np.linalg.solve(self.Luu.T, Luu_inv_Kun)
+            Luu_inv_Kun = self._solve_luu(Kun)
+            Kuu_inv_kun = self._solve_luu_t(Luu_inv_Kun)
             mu_new = Kuu_inv_kun.T @ self.mu
             self.mu = np.vstack((self.mu, mu_new))
 
@@ -389,9 +443,9 @@ class SparseFITCGP:
         by ``add_new_inducing_quick`` (an approximation), so mu_su predictions
         are not expected to match Cholesky predictions exactly.
         """
-        self.Kuf = self.kern.K(self.U, self.X)
-        self.W = np.linalg.solve(self.Luu, self.Kuf)
-        self.Kff_diag = self.kern.Kdiag(self.X)
+        self.Kuf = _kern_K(self.kern, self.U, self.X)
+        self.W = self._solve_luu(self.Kuf)
+        self.Kff_diag = _kern_Kdiag(self.kern, self.X)
         self.Qff_diag = np.power(self.W.T, 2).sum(axis=-1)
         self.diag = self.Kff_diag - self.Qff_diag + self.variance
         if np.any(self.diag <= 0.0):
@@ -412,6 +466,14 @@ class SparseFITCGP:
     # ------------------------------------------------------------------
     
     def dk_dx(self, Xs: np.ndarray) -> np.ndarray:
+        Xs = np.atleast_2d(Xs)
+        if Xs.shape[0] != 1:
+            raise ValueError(
+                "dk_dx/dmu_dx only support a single test input, got "
+                f"{Xs.shape[0]} rows."
+            )
+        if _is_rbf_kernel(self.kern):
+            return _rbf_gradient(self.kern, self.U, Xs)
         mean_jac = np.zeros((self.U.shape[0], self.U.shape[1]))
         for i in range(self.U.shape[1]):
             mean_jac[:, i] = self.kern.dK_dX2(self.U, Xs, i).squeeze()
@@ -420,9 +482,9 @@ class SparseFITCGP:
     # ------------------------------------------------------------------
     
     def dmu_dx(self, Xs: np.ndarray) -> np.ndarray:
-        rhs = np.linalg.solve(self.Luu, self.mu)
+        rhs = self._solve_luu(self.mu)
         dk_dx = self.dk_dx(Xs)
-        lhs = np.linalg.solve(self.Luu, dk_dx)
+        lhs = self._solve_luu(dk_dx)
         result = lhs.T @ rhs
         return result
     
@@ -430,8 +492,8 @@ class SparseFITCGP:
     
     def dvar_dx(self, Xs: np.ndarray, Ws: np.ndarray, tmp: np.ndarray) -> np.ndarray:
         dk_dx = self.dk_dx(Xs)
-        Luu_inv_dk_dx = np.linalg.solve(self.Luu, dk_dx)
-        Kuu_inv_dk_dx = np.linalg.solve(self.Luu.T, Luu_inv_dk_dx)
+        Luu_inv_dk_dx = self._solve_luu(dk_dx)
+        Kuu_inv_dk_dx = self._solve_luu_t(Luu_inv_dk_dx)
         result = -2 * Luu_inv_dk_dx.T @ Ws + 2 * Kuu_inv_dk_dx.T @ self.Su @ tmp
         return result
     
@@ -457,12 +519,12 @@ class SparseFITCGP:
 
         # self.update_L()
 
-        Kss = self.kern.K(Xs)
-        Ksu = self.kern.K(Xs, self.U)
-        Ws = np.linalg.solve(self.Luu, Ksu.T)
-        tmp = np.linalg.solve(self.Luu.T, Ws)
+        Kss = _kern_K(self.kern, Xs)
+        Ksu = _kern_K(self.kern, Xs, self.U)
+        Ws = self._solve_luu(Ksu.T)
+        tmp = self._solve_luu_t(Ws)
         
-        mu = Ws.T @ np.linalg.solve(self.Luu, self.mu)
+        mu = Ws.T @ self._solve_luu(self.mu)
         # var = Kss - Ksu @ (self.Kuu_inv - self.Kuu_inv @ self.Su @ self.Kuu_inv) @ Ksu.T
         var = Kss - Ws.T @ Ws + tmp.T @ self.Su @ tmp
 
@@ -509,9 +571,9 @@ class SparseFITCGP:
 
         self._require_cholesky("predict_cholesky")
 
-        Kss = self.kern.K(Xs)
-        Ksu = self.kern.K(Xs, self.U)
-        Ws = np.linalg.solve(self.Luu, Ksu.T)
+        Kss = _kern_K(self.kern, Xs)
+        Ksu = _kern_K(self.kern, Xs, self.U)
+        Ws = self._solve_luu(Ksu.T)
 
         self.update_L()
 
@@ -550,16 +612,16 @@ class SparseFITCGP:
         self.update_L()
 
         if Ksu is None:
-            Ksu = self.kern.K(X_new, self.U)
+            Ksu = _kern_K(self.kern, X_new, self.U)
         # When the new data is far from the original data, Ktt_diag - Qtt_diag will close to 1, make the update not useful
-        Ktt_diag = self.kern.Kdiag(X_new)
+        Ktt_diag = _kern_Kdiag(self.kern, X_new)
         # Qtt_diag = np.diag(Ksu @ self.Kuu_inv @ Ksu.T)
-        Ws = np.linalg.solve(self.Luu, Ksu.T)
+        Ws = self._solve_luu(Ksu.T)
         Qtt_diag = np.power(Ws.T, 2).sum(axis=-1)
 
         # Φ_k = K(z, U) Kuu^{-1}, shape (M, 1)
         # Phi_k = (K_zU @ self.Kuu_inv).T            # (M, 1)
-        Phi_k = np.linalg.solve(self.Luu.T, Ws)            # (M, 1)
+        Phi_k = self._solve_luu_t(Ws)            # (M, 1)
 
         # Residual: r_k = y - Phi_k^T mu
         r_k = Y_new - Phi_k.T @ self.mu            # scalar
@@ -597,16 +659,16 @@ class SparseFITCGP:
         self.update_L()
 
         if Ksu is None:
-            Ksu = self.kern.K(X_new, self.U)
+            Ksu = _kern_K(self.kern, X_new, self.U)
         # When the new data is far from the original data, Ktt_diag - Qtt_diag will close to 1, make the update not useful
-        Ktt_diag = self.kern.Kdiag(X_new)
+        Ktt_diag = _kern_Kdiag(self.kern, X_new)
         # Qtt_diag = np.diag(Ksu @ self.Kuu_inv @ Ksu.T)
-        Ws = np.linalg.solve(self.Luu, Ksu.T)
+        Ws = self._solve_luu(Ksu.T)
         Qtt_diag = np.power(Ws.T, 2).sum(axis=-1)
 
         # Phi_b = K(X_new, U) Kuu^{-1}, shape (B, M)
         # Phi_b = K_XU @ self.Kuu_inv              # (B, M)
-        Phi_b = np.linalg.solve(self.Luu.T, Ws).T
+        Phi_b = self._solve_luu_t(Ws).T
 
         # Residuals: R_b = Y_new - Phi_b @ mu
         R_b = Y_new - Phi_b @ self.mu            # (B, 1)
@@ -645,12 +707,12 @@ class SparseFITCGP:
 
         self.N = self.X.shape[0]
 
-        Kuf_new = self.kern.K(self.U, X_new)
-        W_new = np.linalg.solve(self.Luu, Kuf_new)
+        Kuf_new = _kern_K(self.kern, self.U, X_new)
+        W_new = self._solve_luu(Kuf_new)
         self.Kuf = np.hstack((self.Kuf, Kuf_new))
         self.W = np.hstack((self.W, W_new))
 
-        Kff_diag_new = self.kern.Kdiag(X_new)
+        Kff_diag_new = _kern_Kdiag(self.kern, X_new)
         Qff_diag_new = np.power(W_new.T, 2).sum(axis=-1)
         diag_new = Kff_diag_new - Qff_diag_new + self.variance
         diag_inv_new = 1 / diag_new
@@ -682,17 +744,17 @@ class SparseFITCGP:
         self.update_mu_su(from_scratch=True)
 
     def check_new_inducing_var(self, U_new: np.ndarray) -> np.ndarray:
-        a = self.kern.K(self.U, U_new)
-        aa = self.kern.K(U_new) + 1e-8  # jitter for numerical stability
+        a = _kern_K(self.kern, self.U, U_new)
+        aa = _kern_K(self.kern, U_new) + 1e-8  # jitter for numerical stability
 
-        c = np.linalg.solve(self.Luu, a)   # (M, 1)
+        c = self._solve_luu(a)   # (M, 1)
 
         return aa - c.T @ c, aa
     
     def add_new_inducing(self, U_new: np.ndarray) -> None:
         self._require_cholesky("add_new_inducing")
-        a = self.kern.K(self.U, U_new)
-        aa = self.kern.K(U_new) + 1e-8  # jitter for numerical stability
+        a = _kern_K(self.kern, self.U, U_new)
+        aa = _kern_K(self.kern, U_new) + 1e-8  # jitter for numerical stability
 
         self.U = np.vstack((self.U, U_new))
         self.M = self.U.shape[0]
@@ -700,7 +762,7 @@ class SparseFITCGP:
         self.update_mu_su(Kun=a, Knn=aa)
         self.Luu = cholesky_add_row(self.Luu, a, aa)
 
-        Ku_new_f = self.kern.K(U_new, self.X)
+        Ku_new_f = _kern_K(self.kern, U_new, self.X)
         self.Kuf = np.vstack((self.Kuf, Ku_new_f))
 
         W_new = (Ku_new_f - self.Luu[-1:, :-1] @ self.W) / self.Luu[-1, -1]
@@ -716,8 +778,8 @@ class SparseFITCGP:
         self.L_updated = False
     
     def add_new_inducing_quick(self, U_new: np.ndarray) -> None:
-        a = self.kern.K(self.U, U_new)
-        aa = self.kern.K(U_new) + 1e-8  # jitter for numerical stability
+        a = _kern_K(self.kern, self.U, U_new)
+        aa = _kern_K(self.kern, U_new) + 1e-8  # jitter for numerical stability
 
         self.U = np.vstack((self.U, U_new))
         self.M = self.U.shape[0]
@@ -741,6 +803,12 @@ class SparseDTCGP:
         self.kern = kernel
         self.gaussian_opts = gaussian_opts
         self.cholesky_valid = False
+
+    def _solve_luu(self, rhs: np.ndarray) -> np.ndarray:
+        return solve_triangular(self.Luu, rhs, lower=True)
+
+    def _solve_luu_t(self, rhs: np.ndarray) -> np.ndarray:
+        return solve_triangular(self.Luu.T, rhs, lower=False)
 
     def fit(self, 
         X: np.ndarray, 
@@ -768,9 +836,9 @@ class SparseDTCGP:
         self.N = len(self.X)
 
         # Core kernel matrices
-        self.Kuu = self.kern.K(self.U)
+        self.Kuu = _kern_K(self.kern, self.U)
         self.Kuu = (self.Kuu + self.Kuu.T) / 2  # ensure symmetry
-        self.Kuf = self.kern.K(self.U, self.X)
+        self.Kuf = _kern_K(self.kern, self.U, self.X)
 
         # Precompute inverses (with jitter for stability)
         jitter = 1e-8 * np.eye(self.M)
@@ -778,7 +846,7 @@ class SparseDTCGP:
 
         # --- Factorized form ---
         # W = Luu^{-1} Kuf
-        self.W = np.linalg.solve(self.Luu, self.Kuf)
+        self.W = self._solve_luu(self.Kuf)
 
         self.W_d_inv_y = (1.0 / self.variance) * self.W @ self.Y
 
@@ -802,11 +870,11 @@ class SparseDTCGP:
         if from_scratch:
             self.update_L()
 
-            # self.Kuu = self.kern.K(self.U)
+            # self.Kuu = _kern_K(self.kern, self.U)
             # self.Kuu = (self.Kuu + self.Kuu.T) / 2  # ensure symmetry
 
             # self.Kuu_inv = np.linalg.solve(
-            #     self.Luu.T, np.linalg.solve(self.Luu, np.eye(self.M))
+            #     self.Luu.T, self._solve_luu(np.eye(self.M))
             # )
 
             # Posterior covariance Su
@@ -816,20 +884,20 @@ class SparseDTCGP:
             #   = inv(Luu).T @ inv(K) @ inv(Luu)
             #   = Luu^{-T} L^{-T} L^{-1} Luu^{-1}
             # Su = Kuu @ Sigma @ Kuu = Luu L^{-T} L^{-1} Luu.T = tmp.T @ tmp
-            # S = np.linalg.solve(self.L, np.linalg.solve(self.Luu, np.eye(self.M)))
+            # S = np.linalg.solve(self.L, self._solve_luu(np.eye(self.M)))
             # self.Sigma = S.T @ S
             tmp = np.linalg.solve(self.L, self.Luu.T)
-            # tmp = np.linalg.solve(self.L, np.linalg.solve(self.Luu, self.Kuu))
+            # tmp = np.linalg.solve(self.L, self._solve_luu(self.Kuu))
             self.Su = tmp.T @ tmp  # symmetric MxM
 
             # Posterior mean mu
-            rhs = np.linalg.solve(self.Luu, (self.Kuf / self.variance) @ self.Y)
-            self.mu = np.linalg.solve(self.Luu, self.Su.T).T @ rhs
+            rhs = self._solve_luu((self.Kuf / self.variance) @ self.Y)
+            self.mu = self._solve_luu(self.Su.T).T @ rhs
         else:
             # TODO: if new inducing points are too many, then the update will have some error
             # TODO: if new inducing is close to old ones, numerical issues may happen
-            Luu_inv_Kun = np.linalg.solve(self.Luu, Kun)
-            Kuu_inv_kun = np.linalg.solve(self.Luu.T, Luu_inv_Kun)
+            Luu_inv_Kun = self._solve_luu(Kun)
+            Kuu_inv_kun = self._solve_luu_t(Luu_inv_Kun)
             mu_new = Kuu_inv_kun.T @ self.mu
             self.mu = np.vstack((self.mu, mu_new))
 
@@ -884,8 +952,8 @@ class SparseDTCGP:
 
     def sync_cholesky(self) -> None:
         """Rebuild the Cholesky-based prediction/update state from U, X and Y."""
-        self.Kuf = self.kern.K(self.U, self.X)
-        self.W = np.linalg.solve(self.Luu, self.Kuf)
+        self.Kuf = _kern_K(self.kern, self.U, self.X)
+        self.W = self._solve_luu(self.Kuf)
         self.W_d_inv_y = (1.0 / self.variance) * self.W @ self.Y
         self.L_updated = False
         self.cholesky_valid = True
@@ -898,6 +966,14 @@ class SparseDTCGP:
     # ------------------------------------------------------------------
     
     def dk_dx(self, Xs: np.ndarray) -> np.ndarray:
+        Xs = np.atleast_2d(Xs)
+        if Xs.shape[0] != 1:
+            raise ValueError(
+                "dk_dx/dmu_dx only support a single test input, got "
+                f"{Xs.shape[0]} rows."
+            )
+        if _is_rbf_kernel(self.kern):
+            return _rbf_gradient(self.kern, self.U, Xs)
         mean_jac = np.zeros((self.U.shape[0], self.U.shape[1]))
         for i in range(self.U.shape[1]):
             mean_jac[:, i] = self.kern.dK_dX2(self.U, Xs, i).squeeze()
@@ -906,9 +982,9 @@ class SparseDTCGP:
     # ------------------------------------------------------------------
     
     def dmu_dx(self, Xs: np.ndarray) -> np.ndarray:
-        rhs = np.linalg.solve(self.Luu, self.mu)
+        rhs = self._solve_luu(self.mu)
         dk_dx = self.dk_dx(Xs)
-        lhs = np.linalg.solve(self.Luu, dk_dx)
+        lhs = self._solve_luu(dk_dx)
         result = lhs.T @ rhs
         return result
     
@@ -916,8 +992,8 @@ class SparseDTCGP:
     
     def dvar_dx(self, Xs: np.ndarray, Ws: np.ndarray, tmp: np.ndarray) -> np.ndarray:
         dk_dx = self.dk_dx(Xs)
-        Luu_inv_dk_dx = np.linalg.solve(self.Luu, dk_dx)
-        Kuu_inv_dk_dx = np.linalg.solve(self.Luu.T, Luu_inv_dk_dx)
+        Luu_inv_dk_dx = self._solve_luu(dk_dx)
+        Kuu_inv_dk_dx = self._solve_luu_t(Luu_inv_dk_dx)
         result = -2 * Luu_inv_dk_dx.T @ Ws + 2 * Kuu_inv_dk_dx.T @ self.Su @ tmp
         return result
         
@@ -943,13 +1019,13 @@ class SparseDTCGP:
 
         self.update_L()
 
-        Kss = self.kern.K(Xs)
-        Ksu = self.kern.K(Xs, self.U)
-        Ws = np.linalg.solve(self.Luu, Ksu.T)
-        # tmp = np.linalg.solve(self.L, np.linalg.solve(self.Luu, Ksu.T))
-        tmp2 = np.linalg.solve(self.Luu.T, Ws)
+        Kss = _kern_K(self.kern, Xs)
+        Ksu = _kern_K(self.kern, Xs, self.U)
+        Ws = self._solve_luu(Ksu.T)
+        # tmp = np.linalg.solve(self.L, self._solve_luu(Ksu.T))
+        tmp2 = self._solve_luu_t(Ws)
         
-        mu = Ws.T @ np.linalg.solve(self.Luu, self.mu)
+        mu = Ws.T @ self._solve_luu(self.mu)
         # var = Kss - Ksu @ (self.Kuu_inv - self.Kuu_inv @ self.Su @ self.Kuu_inv) @ Ksu.T
         # var = Kss - Ws.T @ Ws + tmp.T @ tmp
         var = Kss - Ws.T @ Ws + tmp2.T @ self.Su @ tmp2
@@ -998,9 +1074,9 @@ class SparseDTCGP:
 
         self._require_cholesky("predict_cholesky")
 
-        Kss = self.kern.K(Xs)
-        Ksu = self.kern.K(Xs, self.U)
-        Ws = np.linalg.solve(self.Luu, Ksu.T)
+        Kss = _kern_K(self.kern, Xs)
+        Ksu = _kern_K(self.kern, Xs, self.U)
+        Ws = self._solve_luu(Ksu.T)
         # W_d_inv_y = (1.0 / self.variance) * self.W @ self.Y
 
         self.update_L()
@@ -1040,9 +1116,9 @@ class SparseDTCGP:
         self.update_L()
 
         # Φ_k = K(z, U) Kuu^{-1}, shape (M, 1)
-        K_zU = self.kern.K(X_new, self.U)        # shape (1, M)
+        K_zU = _kern_K(self.kern, X_new, self.U)        # shape (1, M)
         # Phi_k = (K_zU @ self.Kuu_inv).T            # (M, 1)
-        Phi_k = np.linalg.solve(self.Luu.T, np.linalg.solve(self.Luu, K_zU.T))
+        Phi_k = self._solve_luu_t(self._solve_luu(K_zU.T))
 
         # Residual: r_k = y - Phi_k^T mu
         r_k = Y_new - Phi_k.T @ self.mu            # scalar
@@ -1078,9 +1154,9 @@ class SparseDTCGP:
         self.update_L()
 
         # Phi_b = K(X_new, U) Kuu^{-1}, shape (B, M)
-        K_XU = self.kern.K(X_new, self.U)      # (B, M)
+        K_XU = _kern_K(self.kern, X_new, self.U)      # (B, M)
         # Phi_b = K_XU @ self.Kuu_inv              # (B, M)
-        Phi_b = np.linalg.solve(self.Luu.T, np.linalg.solve(self.Luu, K_XU.T)).T
+        Phi_b = self._solve_luu_t(self._solve_luu(K_XU.T)).T
 
         # Residuals: R_b = Y_new - Phi_b @ mu
         R_b = Y_new - Phi_b @ self.mu            # (B, 1)
@@ -1118,8 +1194,8 @@ class SparseDTCGP:
 
         self.N = self.X.shape[0]
 
-        Kuf_new = self.kern.K(self.U, X_new)
-        W_new = np.linalg.solve(self.Luu, Kuf_new)
+        Kuf_new = _kern_K(self.kern, self.U, X_new)
+        W_new = self._solve_luu(Kuf_new)
         self.Kuf = np.hstack((self.Kuf, Kuf_new))
         self.W = np.hstack((self.W, W_new))
 
@@ -1148,10 +1224,10 @@ class SparseDTCGP:
         self.update_mu_su(from_scratch=True)
 
     def check_new_inducing_var(self, U_new: np.ndarray) -> np.ndarray:
-        a = self.kern.K(self.U, U_new)
-        aa = self.kern.K(U_new) + 1e-8  # jitter for numerical stability
+        a = _kern_K(self.kern, self.U, U_new)
+        aa = _kern_K(self.kern, U_new) + 1e-8  # jitter for numerical stability
 
-        c = np.linalg.solve(self.Luu, a)   # (M, 1)
+        c = self._solve_luu(a)   # (M, 1)
 
         return aa - c.T @ c, aa
     
@@ -1160,12 +1236,12 @@ class SparseDTCGP:
         self.U = np.vstack((self.U, U_new))
         self.M = self.U.shape[0]
 
-        a = self.kern.K(self.U[:-1], U_new)
-        aa = self.kern.K(U_new) + 1e-8  # jitter for numerical stability
+        a = _kern_K(self.kern, self.U[:-1], U_new)
+        aa = _kern_K(self.kern, U_new) + 1e-8  # jitter for numerical stability
         self.update_mu_su(Kun=a, Knn=aa)
         self.Luu = cholesky_add_row(self.Luu, a, aa)
 
-        Kuf_new = self.kern.K(U_new, self.X)
+        Kuf_new = _kern_K(self.kern, U_new, self.X)
         self.Kuf = np.vstack((self.Kuf, Kuf_new))
 
         W_new = (Kuf_new - self.Luu[-1:, :-1] @ self.W) / self.Luu[-1, -1]
@@ -1176,8 +1252,8 @@ class SparseDTCGP:
         self.L_updated = False
 
     def add_new_inducing_quick(self, U_new: np.ndarray) -> None:
-        a = self.kern.K(self.U, U_new)
-        aa = self.kern.K(U_new) + 1e-8  # jitter for numerical stability
+        a = _kern_K(self.kern, self.U, U_new)
+        aa = _kern_K(self.kern, U_new) + 1e-8  # jitter for numerical stability
 
         self.U = np.vstack((self.U, U_new))
         self.M = self.U.shape[0]

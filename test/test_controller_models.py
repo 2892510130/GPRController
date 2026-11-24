@@ -199,6 +199,32 @@ def test_non_gaussian_controller_without_gaussian_section(monkeypatch):
     assert np.all(np.isfinite(u))
 
 
+def test_augmented_models_require_input_window_three():
+    config = _config("Kinematic Augmented Frenet Gaussian", 12)
+    config.gaussian.input_window = 4
+
+    path, speed_profile = _circle_path()
+    with pytest.raises(ValueError, match="input_window"):
+        LinearMPC(config, path, speed_profile)
+
+
+def test_solver_is_reused_between_solves(monkeypatch):
+    monkeypatch.setattr(linear_mpc_module, "Logger", _DummyLogger)
+
+    config = _config("Kinematic Frenet", 4)
+    config.mpc.mpcWindow = 6
+    path, speed_profile = _circle_path()
+    mpc = LinearMPC(config, path, speed_profile)
+    try:
+        _solve_once(mpc, config)
+        first_solver = mpc._cached_solver
+        assert first_solver is not None
+        _solve_once(mpc, config)
+        assert mpc._cached_solver is first_solver
+    finally:
+        mpc.logger.close_log()
+
+
 def test_solver_result_check_rejects_failure():
     with pytest.raises(RuntimeError, match="maximum iterations"):
         LinearMPC._check_solver_result(

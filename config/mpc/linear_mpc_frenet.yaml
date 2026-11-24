@@ -26,6 +26,7 @@ mpc:
      
   record_data:           true
   record_data_path:      "log/gpr_log/linear_mpc_frenet.txt"
+  log_path:              "log/linear_mpc_log.txt"
  
 gaussian: 
   path:                  "log/processed_data/linear_mpc_frenet.txt" # delay3[152] delay3n[197] bad_wheel[197]

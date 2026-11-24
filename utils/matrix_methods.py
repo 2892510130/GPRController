@@ -1,5 +1,4 @@
 import numpy as np
-from scipy.linalg import solve_triangular
 
 def block_matrix_inversion(
     A: np.ndarray,

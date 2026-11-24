@@ -1,5 +1,5 @@
 import numpy as np
-from scipy.interpolate import CubicSpline, interp1d
+from scipy.interpolate import CubicSpline
 from utils.math import lerp
 
 def resample(base_value: np.ndarray, base_key: np.ndarray, query_key: np.ndarray, method: str = "linear") ->np.ndarray:

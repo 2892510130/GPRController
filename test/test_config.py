@@ -1,7 +1,22 @@
+import uuid
+from pathlib import Path
+
 import pytest
 
 from utils import Config
 from utils.config import MPCConfig, SimulationConfig
+
+BUILD_DIR = Path(__file__).resolve().parents[1] / "build"
+
+
+@pytest.fixture
+def config_file():
+    BUILD_DIR.mkdir(exist_ok=True)
+    path = BUILD_DIR / f"config-{uuid.uuid4().hex}.yaml"
+    try:
+        yield path
+    finally:
+        path.unlink(missing_ok=True)
 
 
 def _mpc_kwargs(**overrides):
@@ -83,3 +98,25 @@ def test_config_rejects_control_dt_mismatch():
             mpc=MPCConfig(**_mpc_kwargs(control_dt=0.05)),
             sim=SimulationConfig(**_sim_kwargs(control_dt=0.06)),
         )
+
+
+def test_from_yaml_allows_partial_sections(config_file):
+    import yaml
+
+    config_file.write_text(yaml.safe_dump({"mpc": _mpc_kwargs()}), encoding="utf-8")
+    config = Config.from_yaml(str(config_file))
+    assert config.mpc is not None
+    assert config.sim is None
+    assert config.gaussian is None
+
+
+def test_from_yaml_rejects_unknown_sections(config_file):
+    config_file.write_text("unknown_section: 1\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="Unknown config section"):
+        Config.from_yaml(str(config_file))
+
+
+def test_from_yaml_rejects_non_mapping_section(config_file):
+    config_file.write_text("mpc: [1, 2]\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="must be a mapping"):
+        Config.from_yaml(str(config_file))

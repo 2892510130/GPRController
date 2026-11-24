@@ -20,6 +20,16 @@ class LinearMPC:
         self.opts = opts.mpc
         self.gaussian_dict = opts.gaussian
 
+        if "Augmented" in self.opts.model:
+            if self.gaussian_dict is None:
+                raise ValueError("Augmented models require a gaussian config section")
+            if self.gaussian_dict.input_window != 3:
+                raise ValueError(
+                    "Augmented models currently require gaussian.input_window == 3 "
+                    f"(got {self.gaussian_dict.input_window}); the augmented state "
+                    "layout is hard-coded for a three-step history."
+                )
+
         if self.opts.variance_aware:
             if self.gaussian_dict is None:
                 raise ValueError("variance_aware=True requires a gaussian config section")
@@ -34,7 +44,7 @@ class LinearMPC:
                     f"got {self.opts.lambda_var}"
                 )
 
-        self.logger = Logger("log/linear_mpc_log.txt")
+        self.logger = Logger(self.opts.log_path)
 
         self.model = ModelLists[self.opts.model](
             integral_dt=self.opts.mpc_dt,
@@ -73,6 +83,8 @@ class LinearMPC:
 
         self.first_iter = True
         self.record_start = False
+        self._cached_solver = None
+        self._cached_solver_key = None
 
         if self.opts.record_data and self.is_gaussian:
             self.gpr_file = open(self.opts.record_data_path, 'w')
@@ -388,10 +400,23 @@ class LinearMPC:
         return options
 
     def _build_solver(self):
-        qp = {"h": self.H_casadi_sparse}
-        if self.opts.add_delta_constraints:
-            qp["a"] = self.linearMatrix_casadi_sparse
-        return ca.conic("LinearMPC", self.opts.solver, qp, self._make_solver_options())
+        key = (
+            self.opts.solver,
+            bool(self.opts.add_delta_constraints),
+            self.H_casadi_sparse.shape,
+            self.H_casadi_sparse.nnz(),
+            self.linearMatrix_casadi_sparse.shape,
+            self.linearMatrix_casadi_sparse.nnz(),
+        )
+        if self._cached_solver is None or self._cached_solver_key != key:
+            qp = {"h": self.H_casadi_sparse}
+            if self.opts.add_delta_constraints:
+                qp["a"] = self.linearMatrix_casadi_sparse
+            self._cached_solver = ca.conic(
+                "LinearMPC", self.opts.solver, qp, self._make_solver_options()
+            )
+            self._cached_solver_key = key
+        return self._cached_solver
 
     @staticmethod
     def _check_solver_result(solver, solution, context: str) -> None:
@@ -549,18 +574,18 @@ class LinearMPC:
         self.gpr_file.write(" ".join(str(value) for value in values) + "\n")
     
     def log_data(self):
-        self.logger.debug("LinearMPC] Current State: ", self.index)
+        self.logger.debug("Current State: ", self.index)
         if self.is_gaussian:
-            self.logger.debug("LinearMPC] Delta State Nominal: ", [float(self.delta_v_nominal), float(self.delta_w_nominal)])
-            self.logger.debug("LinearMPC] Delta State GPR: ", [float(self.delta_v), float(self.delta_w)])
-            self.logger.debug("LinearMPC] GPR Input: ", [float(i) for i in self.gpr_input_step_1.squeeze()])
-        self.logger.debug("LinearMPC] Matrix C:\n", self.Cex[:self.model.nx].squeeze())
-        self.logger.debug("LinearMPC] Last Command: ", self.last_command.squeeze())
+            self.logger.debug("Delta State Nominal: ", [float(self.delta_v_nominal), float(self.delta_w_nominal)])
+            self.logger.debug("Delta State GPR: ", [float(self.delta_v), float(self.delta_w)])
+            self.logger.debug("GPR Input: ", [float(i) for i in self.gpr_input_step_1.squeeze()])
+        self.logger.debug("Matrix C:\n", self.Cex[:self.model.nx].squeeze())
+        self.logger.debug("Last Command: ", self.last_command.squeeze())
 
         if self.is_gaussian and self.gaussian_dict.sparse_method in (2, 3):
             for i, gp in enumerate(self.model.gaussian_model.gps):
-                self.logger.debug(f"LinearMPC] GPR {i} Inducing Size: ", gp.U.shape)
-                self.logger.debug(f"LinearMPC] GPR {i} predict test: ", gp.predict_noiseless(gp.X[0].reshape(1, -1), full_cov = True))
+                self.logger.debug(f"GPR {i} Inducing Size: ", gp.U.shape)
+                self.logger.debug(f"GPR {i} predict test: ", gp.predict_noiseless(gp.X[0].reshape(1, -1), full_cov = True))
 
         if self.opts.variance_aware:
             pass

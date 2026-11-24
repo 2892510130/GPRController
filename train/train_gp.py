@@ -3,7 +3,7 @@ import numpy as np
 import GPy
 
 from colorama import Fore
-from typing import Any, Sequence
+from typing import Sequence
 
 from utils.criterion import Criterion
 from utils.config import TrainConfig
@@ -100,30 +100,6 @@ def get_pre_processed_data(
         responses.shape,
     )
     return features, responses, additional_data
-
-
-def _get_training_data(config: dict[str, Any], select_index: Sequence[int] | None = None):
-    """Load training features and select the requested output dimension."""
-    features, responses, _ = get_pre_processed_data(
-        config.train_data_number,
-        config.input_window,
-        config.train_file_path,
-        config.gap_window,
-        select=select_index,
-    )
-    return features, responses[:, config.get("_output_id", 0)]
-
-
-def _get_test_data(config: dict[str, Any], output_id: int, select_index=None):
-    """Load test features and select the requested output dimension."""
-    features, responses, _ = get_pre_processed_data(
-        config.test_data_number,
-        config.input_window,
-        config.test_file_path,
-        config.gap_window,
-        select=select_index,
-    )
-    return features, responses[:, output_id]
 
 
 def _create_full_kernel(input_dim: int):

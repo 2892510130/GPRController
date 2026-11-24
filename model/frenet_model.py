@@ -43,7 +43,7 @@ class FrenetModel(ModelInterface):
         self.integrator = ca.integrator("I", solver, dae, 0, tf, opts)
 
     def integrate(self, x0: np.ndarray, input: np.ndarray, kappa: np.ndarray) -> np.ndarray:
-            return np.array(self.integrator(x0 = x0, p = ca.vertcat(input, kappa))['xf'])
+        return np.array(self.integrator(x0 = x0, p = ca.vertcat(input, kappa))['xf'])
 
     def create_discrete_model(self, dt: float, m_curvature: float, linear_method: int = 0) -> None:
         self.A = np.zeros((self.nx, self.nx))

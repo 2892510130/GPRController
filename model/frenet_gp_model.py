@@ -1,5 +1,4 @@
 import numpy as np
-import casadi as ca
 from typing import Tuple
 
 from . import DiscreteMethods
