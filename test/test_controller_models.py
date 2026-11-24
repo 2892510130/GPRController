@@ -32,6 +32,14 @@ class _DummyLogger:
         pass
 
 
+class _FakeSolver:
+    def __init__(self, stats):
+        self._stats = stats
+
+    def stats(self):
+        return self._stats
+
+
 def _config(model_name: str, nx: int) -> Config:
     config = Config.from_yaml(str(CONFIG_PATH))
     config.mpc.model = model_name
@@ -68,12 +76,32 @@ def _circle_path(n: int = 200, radius: float = 5.0, velocity: float = 1.0):
     return path, speed_profile
 
 
+def _initial_state(path, speed_profile):
+    # The controller always receives the full Cartesian measurement
+    # [x, y, yaw, v, w]; Frenet models convert it internally.
+    return np.array([
+        [path[0, 0]],
+        [path[0, 1]],
+        [path[0, 2]],
+        [speed_profile[0, 2]],
+        [speed_profile[0, 4]],
+    ])
+
+
+def _solve_once(mpc, config):
+    path, speed_profile = _circle_path()
+    mpc.initialize(_initial_state(path, speed_profile), config.mpc.control_dt)
+    return mpc.solve()
+
+
 @pytest.mark.parametrize(
     "model_name,nx",
     [
         ("Kinematic Frenet", 4),
         ("Kinematic Frenet Gaussian", 4),
         ("Kinematic Augmented Frenet Gaussian", 12),
+        ("Kinematic Cartesian", 5),
+        ("Kinematic Cartesian Delay", 5),
         ("Kinematic Cartesian Gaussian", 5),
         ("Kinematic Augmented Cartesian Gaussian", 13),
     ],
@@ -84,23 +112,106 @@ def test_controller_models_solve(model_name, nx, monkeypatch):
     config = _config(model_name, nx)
     path, speed_profile = _circle_path()
     mpc = LinearMPC(config, path, speed_profile)
-
-    # The controller always receives the full Cartesian measurement
-    # [x, y, yaw, v, w]; Frenet models convert it internally.
-    x0 = np.array([
-        [path[0, 0]],
-        [path[0, 1]],
-        [path[0, 2]],
-        [speed_profile[0, 2]],
-        [speed_profile[0, 4]],
-    ])
-
     try:
-        mpc.initialize(x0, config.mpc.control_dt)
-        u = mpc.solve()
+        u = _solve_once(mpc, config)
     finally:
         mpc.logger.close_log()
 
     assert u.shape == (mpc.model.nu * MPC_WINDOW, 1)
     assert np.all(np.isfinite(u))
     assert np.max(np.abs(u)) <= max(config.mpc.max_input) + 1e-6
+
+
+@pytest.mark.parametrize(
+    "model_name,nx",
+    [
+        ("Kinematic Augmented Frenet Gaussian", 12),
+        ("Kinematic Augmented Cartesian Gaussian", 13),
+    ],
+)
+def test_variance_aware_solve(model_name, nx, monkeypatch):
+    monkeypatch.setattr(linear_mpc_module, "Logger", _DummyLogger)
+
+    config = _config(model_name, nx)
+    config.mpc.mpcWindow = 6
+    config.mpc.aware_len = 6
+    config.mpc.variance_aware = True
+    config.mpc.lambda_var = [1.0, 1.0]
+    config.gaussian.gpr_method = 1
+
+    path, speed_profile = _circle_path()
+    mpc = LinearMPC(config, path, speed_profile)
+    try:
+        u = _solve_once(mpc, config)
+    finally:
+        mpc.logger.close_log()
+
+    assert np.all(np.isfinite(u))
+    assert mpc.A_sigma.shape == (1, nx * config.mpc.mpcWindow)
+    assert mpc.B_sigma.shape == (1, mpc.model.nu * config.mpc.mpcWindow)
+
+
+def test_variance_aware_requires_first_order_gp(monkeypatch):
+    monkeypatch.setattr(linear_mpc_module, "Logger", _DummyLogger)
+
+    config = _config("Kinematic Augmented Frenet Gaussian", 12)
+    config.mpc.mpcWindow = 4
+    config.mpc.variance_aware = True
+    config.gaussian.gpr_method = 0
+
+    path, speed_profile = _circle_path()
+    with pytest.raises(ValueError, match="gpr_method"):
+        LinearMPC(config, path, speed_profile)
+
+
+def test_variance_aware_requires_augmented_model(monkeypatch):
+    monkeypatch.setattr(linear_mpc_module, "Logger", _DummyLogger)
+
+    config = _config("Kinematic Frenet", 4)
+    config.mpc.mpcWindow = 4
+    config.mpc.variance_aware = True
+    config.gaussian.gpr_method = 1
+
+    path, speed_profile = _circle_path()
+    with pytest.raises(ValueError, match="variance_aware"):
+        LinearMPC(config, path, speed_profile)
+
+
+def test_non_gaussian_controller_without_gaussian_section(monkeypatch):
+    monkeypatch.setattr(linear_mpc_module, "Logger", _DummyLogger)
+
+    config = Config.from_yaml(str(CONFIG_PATH))
+    config.gaussian = None
+    config.mpc.model = "Kinematic Frenet"
+    config.mpc.mpcWindow = 6
+    config.mpc.Q = np.diag([1.0] * 4)
+    config.mpc.Q_final = np.diag([1.0] * 4)
+    config.mpc.record_data = False
+    config.mpc.propagete_cov = False
+
+    path, speed_profile = _circle_path()
+    mpc = LinearMPC(config, path, speed_profile)
+    try:
+        u = _solve_once(mpc, config)
+    finally:
+        mpc.logger.close_log()
+
+    assert np.all(np.isfinite(u))
+
+
+def test_solver_result_check_rejects_failure():
+    with pytest.raises(RuntimeError, match="maximum iterations"):
+        LinearMPC._check_solver_result(
+            _FakeSolver({"success": False, "return_status": "maximum iterations reached"}),
+            {"x": np.zeros((2, 1))},
+            "test",
+        )
+
+
+def test_solver_result_check_rejects_non_finite():
+    with pytest.raises(RuntimeError, match="non-finite"):
+        LinearMPC._check_solver_result(
+            _FakeSolver({"success": True, "return_status": "solved"}),
+            {"x": np.array([[np.nan]])},
+            "test",
+        )

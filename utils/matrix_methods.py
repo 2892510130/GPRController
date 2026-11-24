@@ -71,7 +71,14 @@ def cholesky_add_row(L: np.ndarray, a: np.ndarray, aa: np.ndarray) -> np.ndarray
     aa: (M_new, M_new)
     """
     c = np.linalg.solve(L, a)
-    d = np.sqrt(aa - c.T @ c)
+    d_sq = aa - c.T @ c
+    if np.any(d_sq <= 0.0):
+        raise FloatingPointError(
+            "cholesky_add_row: the updated matrix is not positive definite; "
+            "the new inducing point is probably (nearly) linearly dependent on "
+            "the existing ones."
+        )
+    d = np.sqrt(d_sq)
     left = np.vstack((L, c.T))
     right = np.vstack((np.zeros((L.shape[0], d.shape[1])), d))
     L_new = np.hstack((left, right))

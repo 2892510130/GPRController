@@ -15,3 +15,7 @@
 ### Run with the advanced model/controller
 - Modify the mpc config, the gaussian part (`path`, `total_data_number` and more)
   - `gpr_method` with 0 is zero-order GP controller, with 1 is first-order GP controller
+- With `add_mu_su: true` new inducing points are added online through the fast `mu_su`
+  path. That path only keeps the mean/covariance prediction state up to date; the
+  Cholesky-based predictor is marked as stale until `sync_cholesky()` is called
+  explicitly. `predict_noiseless()` (`mu_su`) is the intended online predictor.

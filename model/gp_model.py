@@ -22,10 +22,213 @@ class Normalizer:
     def inverse_variance(self, data: np.ndarray) -> np.ndarray:
         return data * (self.std ** 2)
 
+_MODEL_FORMAT_VERSION = 2
+_NPZ_MAGIC = b"PK\x03\x04"
+
+
+def _is_npz_file(path: str) -> bool:
+    """The model files keep the historical `.npy` suffix; detect the container."""
+    with open(path, "rb") as file:
+        return file.read(len(_NPZ_MAGIC)) == _NPZ_MAGIC
+
+
+def _save_sparse_gp(model, path: str, kind: str) -> None:
+    """Persist a sparse GP (mu_su state always, Cholesky state when valid)."""
+    if model.cholesky_valid:
+        # Make sure L matches the current W/diag before it is written out.
+        model.update_L()
+    arrays = {
+        "format_version": np.array(_MODEL_FORMAT_VERSION),
+        "kind": np.array(kind),
+        "N": np.array(model.N),
+        "M": np.array(model.M),
+        "variance": np.array(model.variance),
+        "lambda_": np.array(model.lambda_),
+        "X": model.X,
+        "Y": model.Y,
+        "U": model.U,
+        "feature_dim": np.array(model.U.shape[1]),
+        "kernel_params": np.asarray(model.kern.param_array, dtype=float),
+        "normalize_y": np.array(bool(model.gaussian_opts.normalize_y)),
+        "cholesky_valid": np.array(bool(model.cholesky_valid)),
+        "Luu": model.Luu,
+        "mu": model.mu,
+        "Su": model.Su,
+    }
+    if model.normalizer is not None:
+        arrays["normalizer_mean"] = np.array(model.normalizer.mean)
+        arrays["normalizer_std"] = np.array(model.normalizer.std)
+
+    if model.cholesky_valid:
+        arrays["Kuf"] = model.Kuf
+        arrays["W"] = model.W
+        arrays["W_d_inv_y"] = model.W_d_inv_y
+        arrays["L"] = model.L
+        if kind == "FITC":
+            arrays["diag"] = model.diag
+            arrays["diag_inv"] = model.diag_inv
+
+    with open(path, "wb") as file:
+        np.savez(file, **arrays)
+
+
+def _load_legacy_sparse_gp(model, path: str, kind: str) -> None:
+    """Read the pre-versioning format (a flat sequence of np.save records)."""
+    with open(path, "rb") as file:
+        N = int(np.load(file))
+        M = int(np.load(file))
+        variance = float(np.load(file))
+        lambda_ = float(np.load(file))
+        X = np.load(file)
+        Y = np.load(file)
+        U = np.load(file)
+
+        if model.gaussian_opts.normalize_y is True:
+            mean = np.load(file)
+            std = np.load(file)
+            normalizer = Normalizer(Y)
+            normalizer.mean, normalizer.std = mean, std
+        else:
+            normalizer = None
+
+        Luu = np.load(file)
+        mu = np.load(file)
+        Su = np.load(file)
+        Kuf = np.load(file)
+        W = np.load(file)
+        if kind == "FITC":
+            diag = np.load(file)
+            diag_inv = np.load(file)
+            W_d_inv_y = np.load(file)
+            L = np.load(file)
+        else:
+            W_d_inv_y = np.load(file)
+            L = np.load(file)
+
+    model.N, model.M = N, M
+    model.variance, model.lambda_ = variance, lambda_
+    model.X, model.Y, model.U = X, Y, U
+    model.normalizer = normalizer
+    model.Luu, model.mu, model.Su = Luu, mu, Su
+    model.Kuf, model.W = Kuf, W
+    model.W_d_inv_y, model.L = W_d_inv_y, L
+    if kind == "FITC":
+        model.diag, model.diag_inv = diag, diag_inv
+    model.L_updated = True
+    model.cholesky_valid = True
+
+
+def _load_sparse_gp(model, path: str, kind: str) -> None:
+    if not _is_npz_file(path):
+        _load_legacy_sparse_gp(model, path, kind)
+        return
+
+    with np.load(path, allow_pickle=False) as data:
+        version = int(data["format_version"].item())
+        if version != _MODEL_FORMAT_VERSION:
+            raise ValueError(
+                f"[GPR]: unsupported model file version {version} in '{path}' "
+                f"(expected {_MODEL_FORMAT_VERSION})"
+            )
+
+        saved_kind = str(data["kind"].item())
+        if saved_kind != kind:
+            raise ValueError(
+                f"[GPR]: model file '{path}' was trained with a {saved_kind} GP, but "
+                f"the configured sparse_method uses {kind}; retrain or fix sparse_method."
+            )
+
+        saved_normalize = bool(data["normalize_y"].item())
+        configured_normalize = bool(model.gaussian_opts.normalize_y)
+        if saved_normalize != configured_normalize:
+            raise ValueError(
+                f"[GPR]: model file '{path}' was trained with normalize_y={saved_normalize} "
+                f"but the config says {configured_normalize}; retrain or fix the config."
+            )
+
+        feature_dim = int(data["feature_dim"].item())
+        if feature_dim != model.kern.input_dim:
+            raise ValueError(
+                f"[GPR]: model file '{path}' has {feature_dim} input features but the "
+                f"config builds a kernel for {model.kern.input_dim}; retrain or fix input_window."
+            )
+
+        kernel_params = np.asarray(data["kernel_params"], dtype=float)
+        config_kernel_params = np.asarray(model.kern.param_array, dtype=float)
+        if not np.allclose(kernel_params, config_kernel_params, rtol=1e-6, atol=0.0):
+            raise ValueError(
+                f"[GPR]: model file '{path}' was trained with different kernel "
+                "hyperparameters than config.gaussian.params; update the params or "
+                "retrain with read_model: false."
+            )
+
+        N = int(data["N"].item())
+        M = int(data["M"].item())
+        variance = float(data["variance"].item())
+        lambda_ = float(data["lambda_"].item())
+        X = np.array(data["X"])
+        Y = np.array(data["Y"])
+        U = np.array(data["U"])
+        Luu = np.array(data["Luu"])
+        mu = np.array(data["mu"])
+        Su = np.array(data["Su"])
+        cholesky_valid = bool(data["cholesky_valid"].item())
+
+        normalizer = None
+        if saved_normalize:
+            normalizer = Normalizer(Y)
+            normalizer.mean = float(data["normalizer_mean"].item())
+            normalizer.std = float(data["normalizer_std"].item())
+
+        if cholesky_valid:
+            Kuf = np.array(data["Kuf"])
+            W = np.array(data["W"])
+            W_d_inv_y = np.array(data["W_d_inv_y"])
+            L = np.array(data["L"])
+            if kind == "FITC":
+                diag = np.array(data["diag"])
+                diag_inv = np.array(data["diag_inv"])
+
+    if X.ndim != 2 or X.shape != (N, feature_dim):
+        raise ValueError(f"[GPR]: invalid X shape {X.shape} in '{path}' (expected ({N}, {feature_dim}))")
+    if Y.shape != (N, 1):
+        raise ValueError(f"[GPR]: invalid Y shape {Y.shape} in '{path}' (expected ({N}, 1))")
+    if U.shape != (M, feature_dim):
+        raise ValueError(f"[GPR]: invalid U shape {U.shape} in '{path}' (expected ({M}, {feature_dim}))")
+    if Luu.shape != (M, M) or mu.shape != (M, 1) or Su.shape != (M, M):
+        raise ValueError(
+            f"[GPR]: inconsistent mu_su state in '{path}': Luu {Luu.shape}, "
+            f"mu {mu.shape}, Su {Su.shape} (expected M={M})"
+        )
+    if cholesky_valid:
+        if Kuf.shape != (M, N) or W.shape != (M, N):
+            raise ValueError(f"[GPR]: inconsistent Cholesky state in '{path}' (Kuf/W shapes)")
+        if W_d_inv_y.shape != (M, 1) or L.shape != (M, M):
+            raise ValueError(f"[GPR]: inconsistent Cholesky state in '{path}' (W_d_inv_y/L shapes)")
+        if kind == "FITC" and (diag.shape != (N,) or diag_inv.shape != (N,)):
+            raise ValueError(f"[GPR]: inconsistent FITC diag state in '{path}'")
+
+    model.N, model.M = N, M
+    model.variance, model.lambda_ = variance, lambda_
+    model.X, model.Y, model.U = X, Y, U
+    model.normalizer = normalizer
+    model.Luu, model.mu, model.Su = Luu, mu, Su
+    model.cholesky_valid = cholesky_valid
+    if cholesky_valid:
+        model.Kuf, model.W = Kuf, W
+        model.W_d_inv_y, model.L = W_d_inv_y, L
+        if kind == "FITC":
+            model.diag, model.diag_inv = diag, diag_inv
+        model.L_updated = True
+    else:
+        model.L_updated = False
+
+
 class SparseFITCGP:
     def __init__(self, kernel: GPy.kern, gaussian_opts: GaussianConfig) -> None:
         self.kern = kernel
         self.gaussian_opts = gaussian_opts
+        self.cholesky_valid = False
 
     def fit(
         self, 
@@ -85,6 +288,8 @@ class SparseFITCGP:
 
         self.update_mu_su(from_scratch=True)
 
+        self.cholesky_valid = True
+
     # ------------------------------------------------------------------
 
     def update_mu_su(
@@ -136,11 +341,14 @@ class SparseFITCGP:
 
     # ------------------------------------------------------------------
 
-    def predict(self, Xs: np.ndarray, method: str = 'cholesky', compute_dvar_dx: bool = False) -> Tuple[np.ndarray]:
+    def predict(self, Xs: np.ndarray, method: str = 'mu_su', compute_dvar_dx: bool = False) -> Tuple[np.ndarray]:
         if method == 'cholesky':
             return self.predict_cholesky(Xs)
-        elif method == 'mu_su':
+        if method == 'mu_su':
             return self.predict_mu_su(Xs, compute_dvar_dx=compute_dvar_dx)
+        raise ValueError(
+            f"Unknown prediction method '{method}'; expected 'mu_su' or 'cholesky'."
+        )
     
     # ------------------------------------------------------------------
 
@@ -152,62 +360,54 @@ class SparseFITCGP:
     def save_model(self, id: str) -> None:
         print(f'[GPR]: Saving Sparse FITC GP Model with normalized: {self.gaussian_opts.normalize_y}')
         save_path = self.gaussian_opts.save_path + id + '.npy'
-        with open(save_path, 'wb') as file:
-            np.save(file, self.N)
-            np.save(file, self.M)
-            np.save(file, self.variance)
-            np.save(file, self.lambda_)
-            np.save(file, self.X)
-            np.save(file, self.Y)
-            np.save(file, self.U)
-
-            if self.gaussian_opts.normalize_y is True:
-                np.save(file, self.normalizer.mean)
-                np.save(file, self.normalizer.std)
-            
-            np.save(file, self.Luu)
-            np.save(file, self.mu)
-            np.save(file, self.Su)
-            np.save(file, self.Kuf)
-            np.save(file, self.W)
-            np.save(file, self.diag)
-            np.save(file, self.diag_inv)
-            np.save(file, self.W_d_inv_y)
-            np.save(file, self.L)
+        _save_sparse_gp(self, save_path, "FITC")
 
     # ------------------------------------------------------------------
 
     def load_model(self, id: str) -> None:
         print(f'[GPR]: Loading Sparse FITC GP Model with normalized: {self.gaussian_opts.normalize_y}')
         load_path = self.gaussian_opts.load_path + id + '.npy'
-        with open(load_path, 'rb') as file:
-            self.N = np.load(file)
-            self.M = np.load(file)
-            self.variance = np.load(file)
-            self.lambda_ = np.load(file)
-            self.X = np.load(file)
-            self.Y = np.load(file)
-            self.U = np.load(file)
+        _load_sparse_gp(self, load_path, "FITC")
 
-            if self.gaussian_opts.normalize_y is True:
-                mean = np.load(file)
-                std = np.load(file)
-                self.normalizer = Normalizer(self.Y)
-                self.normalizer.mean = mean
-                self.normalizer.std = std
-            else:
-                self.normalizer = None
-            
-            self.Luu = np.load(file)
-            self.mu = np.load(file)
-            self.Su = np.load(file)
-            self.Kuf = np.load(file)
-            self.W = np.load(file)
-            self.diag = np.load(file)
-            self.diag_inv = np.load(file)
-            self.W_d_inv_y = np.load(file)
-            self.L = np.load(file)
-        self.L_updated = True
+    # ------------------------------------------------------------------
+
+    def _require_cholesky(self, operation: str) -> None:
+        if not self.cholesky_valid:
+            raise RuntimeError(
+                f"{self.__class__.__name__}.{operation}: the Cholesky-based state is "
+                "stale because add_new_inducing_quick() only maintains the mu_su "
+                "(mean/covariance) prediction state. Use predict_noiseless() or "
+                "predict(..., method='mu_su'), or call sync_cholesky() first."
+            )
+
+    # ------------------------------------------------------------------
+
+    def sync_cholesky(self) -> None:
+        """Rebuild the Cholesky-based prediction/update state from U, X and Y.
+
+        Note: ``mu``/``Su`` keep the incrementally updated posterior maintained
+        by ``add_new_inducing_quick`` (an approximation), so mu_su predictions
+        are not expected to match Cholesky predictions exactly.
+        """
+        self.Kuf = self.kern.K(self.U, self.X)
+        self.W = np.linalg.solve(self.Luu, self.Kuf)
+        self.Kff_diag = self.kern.Kdiag(self.X)
+        self.Qff_diag = np.power(self.W.T, 2).sum(axis=-1)
+        self.diag = self.Kff_diag - self.Qff_diag + self.variance
+        if np.any(self.diag <= 0.0):
+            raise FloatingPointError(
+                f"{self.__class__.__name__}.sync_cholesky: non-positive FITC diagonal; "
+                "increase the GP noise variance before syncing."
+            )
+        self.diag_inv = 1.0 / self.diag
+        self.W_d_inv_y = (self.W * self.diag_inv) @ self.Y
+        self.L_updated = False
+        self.cholesky_valid = True
+        try:
+            self.update_L()
+        except Exception:
+            self.cholesky_valid = False
+            raise
 
     # ------------------------------------------------------------------
     
@@ -306,6 +506,8 @@ class SparseFITCGP:
             Predictive variance.
         '''
         Xs = np.atleast_2d(Xs)
+
+        self._require_cholesky("predict_cholesky")
 
         Kss = self.kern.K(Xs)
         Ksu = self.kern.K(Xs, self.U)
@@ -424,12 +626,17 @@ class SparseFITCGP:
 
     def update_L(self) -> None:
         if not self.L_updated:
+            if not self.cholesky_valid:
+                # Quick updates keep only the mu_su state; there is nothing to
+                # rebuild until sync_cholesky() is called.
+                return
             self.K = (self.W * self.diag_inv) @ self.W.T
             self.K = (self.K + self.K.T) / 2 + np.eye(self.M)
             self.L = np.linalg.cholesky(self.K)
             self.L_updated = True
 
     def add_new_data(self, X_new: np.ndarray, Y_new: np.ndarray) -> None:
+        self._require_cholesky("add_new_data")
         if self.gaussian_opts.normalize_y is True:
             Y_new = self.normalizer.normalize(Y_new)
 
@@ -454,27 +661,25 @@ class SparseFITCGP:
         self.W_d_inv_y += W_d_inv_y_new.reshape(self.W_d_inv_y.shape)
         
         self.L_updated = False
+        # Keep the mu_su posterior consistent with the enlarged training set.
+        self.update_mu_su(from_scratch=True)
 
     def remove_data(self, remove_number: int | None = None, reserve_indices: list[int] | None = None) -> None:
+        self._require_cholesky("remove_data")
         if remove_number is None and reserve_indices is None:
             raise ValueError('Either remove_number or reserve_indices must be provided.')
 
-        W_old = self.W[:, :remove_number]
-        diag_inv_old = self.diag_inv[:remove_number]
-        Y_old = self.Y[:remove_number]
+        keep = np.zeros(self.N, dtype=bool)
+        if reserve_indices is not None:
+            keep[reserve_indices] = True
+        else:
+            keep[remove_number:] = True
 
-        self.X = self.X[remove_number:]
-        self.Y = self.Y[remove_number:]
+        self.X = self.X[keep]
+        self.Y = self.Y[keep]
         self.N = self.X.shape[0]
-
-        self.Kuf = self.Kuf[:, remove_number:]
-        self.W = self.W[:, remove_number:]
-        self.diag = self.diag[remove_number:]
-        self.diag_inv = self.diag_inv[remove_number:]
-
-        self.W_d_inv_y -= (W_old * diag_inv_old) @ Y_old
-
-        # self.L_updated = False # Whether this is needed?
+        self.sync_cholesky()
+        self.update_mu_su(from_scratch=True)
 
     def check_new_inducing_var(self, U_new: np.ndarray) -> np.ndarray:
         a = self.kern.K(self.U, U_new)
@@ -485,6 +690,7 @@ class SparseFITCGP:
         return aa - c.T @ c, aa
     
     def add_new_inducing(self, U_new: np.ndarray) -> None:
+        self._require_cholesky("add_new_inducing")
         a = self.kern.K(self.U, U_new)
         aa = self.kern.K(U_new) + 1e-8  # jitter for numerical stability
 
@@ -519,13 +725,22 @@ class SparseFITCGP:
         self.update_mu_su(Kun=a, Knn=aa)
         self.Luu = cholesky_add_row(self.Luu, a, aa)
 
+        # Quick updates intentionally skip Kuf/W/diag/L: only the mu_su
+        # prediction state is kept up to date. Cholesky users must call
+        # sync_cholesky() first (or stick to predict_noiseless).
+        self.cholesky_valid = False
+        self.L_updated = False
+
     def remove_inducing(self, remove_number: int | None = None, reserve_indices: list[int] | None = None) -> None:
-        pass
+        raise NotImplementedError(
+            "remove_inducing is not implemented; rebuild the GP with fewer inducing points instead."
+        )
 
 class SparseDTCGP:
     def __init__(self, kernel: GPy.kern, gaussian_opts: GaussianConfig) -> None:
         self.kern = kernel
         self.gaussian_opts = gaussian_opts
+        self.cholesky_valid = False
 
     def fit(self, 
         X: np.ndarray, 
@@ -579,6 +794,8 @@ class SparseDTCGP:
 
         self.update_mu_su(from_scratch=True)
 
+        self.cholesky_valid = True
+
     # ------------------------------------------------------------------
 
     def update_mu_su(self, from_scratch: bool = False, Kun: np.ndarray | None = None, Knn: np.ndarray | None = None) -> None:
@@ -624,11 +841,14 @@ class SparseDTCGP:
 
     # ------------------------------------------------------------------
 
-    def predict(self, Xs: np.ndarray, method: str = 'cholesky', compute_dvar_dx: bool = False) -> Tuple[np.ndarray]:
+    def predict(self, Xs: np.ndarray, method: str = 'mu_su', compute_dvar_dx: bool = False) -> Tuple[np.ndarray]:
         if method == 'cholesky':
             return self.predict_cholesky(Xs)
-        elif method == 'mu_su':
+        if method == 'mu_su':
             return self.predict_mu_su(Xs, compute_dvar_dx=compute_dvar_dx)
+        raise ValueError(
+            f"Unknown prediction method '{method}'; expected 'mu_su' or 'cholesky'."
+        )
     
     # ------------------------------------------------------------------
 
@@ -640,58 +860,40 @@ class SparseDTCGP:
     def save_model(self, id: str) -> None:
         print(f'[GPR]: Saving Sparse DTC GP Model with normalized: {self.gaussian_opts.normalize_y}')
         save_path = self.gaussian_opts.save_path + id + '.npy'
-        with open(save_path, 'wb') as file:
-            np.save(file, self.N)
-            np.save(file, self.M)
-            np.save(file, self.variance)
-            np.save(file, self.lambda_)
-            np.save(file, self.X)
-            np.save(file, self.Y)
-            np.save(file, self.U)
-
-            if self.gaussian_opts.normalize_y is True:
-                np.save(file, self.normalizer.mean)
-                np.save(file, self.normalizer.std)
-            
-            np.save(file, self.Luu)
-            np.save(file, self.mu)
-            np.save(file, self.Su)
-            np.save(file, self.Kuf)
-            np.save(file, self.W)
-            np.save(file, self.W_d_inv_y)
-            np.save(file, self.L)
+        _save_sparse_gp(self, save_path, "DTC")
 
     # ------------------------------------------------------------------
 
     def load_model(self, id: str) -> None:
         print(f'[GPR]: Loading Sparse DTC GP Model with normalized: {self.gaussian_opts.normalize_y}')
         load_path = self.gaussian_opts.load_path + id + '.npy'
-        with open(load_path, 'rb') as file:
-            self.N = np.load(file)
-            self.M = np.load(file)
-            self.variance = np.load(file)
-            self.lambda_ = np.load(file)
-            self.X = np.load(file)
-            self.Y = np.load(file)
-            self.U = np.load(file)
+        _load_sparse_gp(self, load_path, "DTC")
 
-            if self.gaussian_opts.normalize_y is True:
-                mean = np.load(file)
-                std = np.load(file)
-                self.normalizer = Normalizer(self.Y)
-                self.normalizer.mean = mean
-                self.normalizer.std = std
-            else:
-                self.normalizer = None
-                
-            self.Luu = np.load(file)
-            self.mu = np.load(file)
-            self.Su = np.load(file)
-            self.Kuf = np.load(file)
-            self.W = np.load(file)
-            self.W_d_inv_y = np.load(file)
-            self.L = np.load(file)
-        self.L_updated = True
+    # ------------------------------------------------------------------
+
+    def _require_cholesky(self, operation: str) -> None:
+        if not self.cholesky_valid:
+            raise RuntimeError(
+                f"{self.__class__.__name__}.{operation}: the Cholesky-based state is "
+                "stale because add_new_inducing_quick() only maintains the mu_su "
+                "(mean/covariance) prediction state. Use predict_noiseless() or "
+                "predict(..., method='mu_su'), or call sync_cholesky() first."
+            )
+
+    # ------------------------------------------------------------------
+
+    def sync_cholesky(self) -> None:
+        """Rebuild the Cholesky-based prediction/update state from U, X and Y."""
+        self.Kuf = self.kern.K(self.U, self.X)
+        self.W = np.linalg.solve(self.Luu, self.Kuf)
+        self.W_d_inv_y = (1.0 / self.variance) * self.W @ self.Y
+        self.L_updated = False
+        self.cholesky_valid = True
+        try:
+            self.update_L()
+        except Exception:
+            self.cholesky_valid = False
+            raise
             
     # ------------------------------------------------------------------
     
@@ -794,6 +996,8 @@ class SparseDTCGP:
         '''
         Xs = np.atleast_2d(Xs)
 
+        self._require_cholesky("predict_cholesky")
+
         Kss = self.kern.K(Xs)
         Ksu = self.kern.K(Xs, self.U)
         Ws = np.linalg.solve(self.Luu, Ksu.T)
@@ -895,12 +1099,17 @@ class SparseDTCGP:
 
     def update_L(self) -> None:
         if not self.L_updated:
+            if not self.cholesky_valid:
+                # Quick updates keep only the mu_su state; there is nothing to
+                # rebuild until sync_cholesky() is called.
+                return
             self.K = (1 / self.variance) * self.W @ self.W.T
             self.K = (self.K + self.K.T) / 2 + np.eye(self.M)
             self.L = np.linalg.cholesky(self.K)
             self.L_updated = True
 
     def add_new_data(self, X_new: np.ndarray, Y_new: np.ndarray) -> None:
+        self._require_cholesky("add_new_data")
         if self.gaussian_opts.normalize_y is True:
             Y_new = self.normalizer.normalize(Y_new)
             
@@ -918,24 +1127,25 @@ class SparseDTCGP:
         self.W_d_inv_y += W_d_inv_y_new.reshape(self.W_d_inv_y.shape)
         
         self.L_updated = False
+        # Keep the mu_su posterior consistent with the enlarged training set.
+        self.update_mu_su(from_scratch=True)
 
     def remove_data(self, remove_number: int | None = None, reserve_indices: list[int] | None = None) -> None:
+        self._require_cholesky("remove_data")
         if remove_number is None and reserve_indices is None:
             raise ValueError('Either remove_number or reserve_indices must be provided.')
 
-        W_old = self.W[:, :remove_number]
-        Y_old = self.Y[:remove_number]
+        keep = np.zeros(self.N, dtype=bool)
+        if reserve_indices is not None:
+            keep[reserve_indices] = True
+        else:
+            keep[remove_number:] = True
 
-        self.X = self.X[remove_number:]
-        self.Y = self.Y[remove_number:]
+        self.X = self.X[keep]
+        self.Y = self.Y[keep]
         self.N = self.X.shape[0]
-
-        self.Kuf = self.Kuf[:, remove_number:]
-        self.W = self.W[:, remove_number:]
-
-        self.W_d_inv_y -= 1.0 / self.variance * W_old @ Y_old
-
-        # self.L_updated = False # Whether this is needed?
+        self.sync_cholesky()
+        self.update_mu_su(from_scratch=True)
 
     def check_new_inducing_var(self, U_new: np.ndarray) -> np.ndarray:
         a = self.kern.K(self.U, U_new)
@@ -946,6 +1156,7 @@ class SparseDTCGP:
         return aa - c.T @ c, aa
     
     def add_new_inducing(self, U_new: np.ndarray) -> None:
+        self._require_cholesky("add_new_inducing")
         self.U = np.vstack((self.U, U_new))
         self.M = self.U.shape[0]
 
@@ -973,9 +1184,17 @@ class SparseDTCGP:
 
         self.update_mu_su(Kun=a, Knn=aa)
         self.Luu = cholesky_add_row(self.Luu, a, aa)
+
+        # Quick updates intentionally skip Kuf/W/diag/L: only the mu_su
+        # prediction state is kept up to date. Cholesky users must call
+        # sync_cholesky() first (or stick to predict_noiseless).
+        self.cholesky_valid = False
+        self.L_updated = False
         
     def remove_inducing(self, remove_number: int | None = None, reserve_indices: list[int] | None = None) -> None:
-        pass
+        raise NotImplementedError(
+            "remove_inducing is not implemented; rebuild the GP with fewer inducing points instead."
+        )
 
 class GaussianModel:
     def __init__(self, gaussian_opts: GaussianConfig) -> None:
@@ -990,7 +1209,11 @@ class GaussianModel:
         self.opts = gaussian_opts
 
         # ----- 1. Read the data and load it to numpy -----
-        train_data, inducing_data = self.read_data(gaussian_opts)
+        if gaussian_opts.read_model is True:
+            # Loading a saved model does not need the training data file.
+            train_data, inducing_data = None, None
+        else:
+            train_data, inducing_data = self.read_data(gaussian_opts)
         self.feature_size = gaussian_opts.input_window * 4 # for now the feature is [v, w, v_c, w_c] of history
 
         # ----- 2. Build the GPR for the all states -----

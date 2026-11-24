@@ -4,10 +4,36 @@ import casadi as ca
 from utils import Config, Logger, normalize_angle
 from model import ModelLists
 
+# Nearest-point search is restricted to a window around the previous index;
+# a full scan is only used when the local window is clearly off the path.
+_NEAREST_SEARCH_WINDOW = 100
+_GLOBAL_SEARCH_DISTANCE = 1.0
+
+
+def _to_float(value) -> float:
+    """Convert a scalar or a size-1 array to a Python float."""
+    return float(np.asarray(value).reshape(-1)[0])
+
+
 class LinearMPC:
     def __init__(self, opts:Config, path, speed_profile):
         self.opts = opts.mpc
         self.gaussian_dict = opts.gaussian
+
+        if self.opts.variance_aware:
+            if self.gaussian_dict is None:
+                raise ValueError("variance_aware=True requires a gaussian config section")
+            if self.gaussian_dict.gpr_method < 1:
+                raise ValueError(
+                    "variance_aware=True requires the first-order GP model "
+                    f"(gpr_method >= 1), got gpr_method={self.gaussian_dict.gpr_method}"
+                )
+            if len(self.opts.lambda_var) != 2:
+                raise ValueError(
+                    "lambda_var must contain exactly two weights (variance and yaw rate), "
+                    f"got {self.opts.lambda_var}"
+                )
+
         self.logger = Logger("log/linear_mpc_log.txt")
 
         self.model = ModelLists[self.opts.model](
@@ -70,7 +96,7 @@ class LinearMPC:
         if "Cartesian" in self.model.name:
             x0 = cur_state
         elif "Frenet" in self.model.name:
-            x0[0], x0[1], x0[2], x0[3] = self.lat_error, self.head_error, cur_state[3], cur_state[4]
+            x0[0], x0[1], x0[2], x0[3] = self.lat_error, self.head_error, _to_float(cur_state[3]), _to_float(cur_state[4])
 
         if self.is_gaussian:
             self.gpr_input_tmp = self.gpr_input.copy()
@@ -97,13 +123,28 @@ class LinearMPC:
         self.x0 = x0.copy()
 
     def compute_error(self, cur_state):
-        distances = np.linalg.norm(self.path[:, :2] - cur_state[:2].reshape(-1, 2), axis=1)
-        nearest_index = np.argmin(distances)
-        dx = cur_state[0] - self.path[nearest_index, 0]
-        dy = cur_state[1] - self.path[nearest_index, 1]
-        dyaw = cur_state[2] - self.path[nearest_index, 2]
-        lat_error = np.cos(self.path[nearest_index, 2]) * dy - np.sin(self.path[nearest_index, 2]) * dx
-        head_error = normalize_angle(dyaw)
+        position = np.asarray(cur_state).reshape(-1)[:2]
+        path_xy = self.path[:, :2]
+        num_points = path_xy.shape[0]
+        previous_index = int(getattr(self, "index", 0))
+
+        low = max(0, previous_index - _NEAREST_SEARCH_WINDOW)
+        high = min(num_points, previous_index + _NEAREST_SEARCH_WINDOW + 1)
+        distances = np.linalg.norm(path_xy[low:high] - position.reshape(1, 2), axis=1)
+        nearest_index = low + int(np.argmin(distances))
+
+        # On a jump (e.g. after (re)initialization) the local window may not
+        # contain the closest point at all; fall back to a global scan.
+        if distances.min() > _GLOBAL_SEARCH_DISTANCE:
+            global_distances = np.linalg.norm(path_xy - position.reshape(1, 2), axis=1)
+            nearest_index = int(np.argmin(global_distances))
+
+        path_x, path_y, path_yaw = self.path[nearest_index, :3]
+        dx = _to_float(cur_state[0]) - path_x
+        dy = _to_float(cur_state[1]) - path_y
+        dyaw = _to_float(cur_state[2]) - path_yaw
+        lat_error = float(np.cos(path_yaw) * dy - np.sin(path_yaw) * dx)
+        head_error = float(normalize_angle(dyaw))
         return lat_error, head_error, nearest_index
     
     def setup_weight_matrices(self):
@@ -148,6 +189,11 @@ class LinearMPC:
             self.var_list = []
         x_pred = self.x0.copy()
         self.gpr_list = []
+        if self.opts.variance_aware:
+            # Entries for horizon steps beyond aware_len are not refreshed
+            # below, so start from zeros on every solve.
+            self.A_sigma.fill(0.0)
+            self.B_sigma.fill(0.0)
 
         for i in range(N):
             self.model.set_reference(self.xr[i * nx : (i+1) * nx], self.ur[i * nu : (i+1) * nu])
@@ -311,41 +357,60 @@ class LinearMPC:
             # x_pred[:] = self.model.A @ x_pred + self.model.B @ self.gpr_input_tmp[:, 2:4].T + self.model.C
             x_pred[:] = self.model.A @ x_pred + self.model.B @ self.u_guess[(i-1) * nu : i * nu] + self.model.C
 
-        self.gpr_input_tmp[0, 0] = x_pred[self.model.LINV]
-        self.gpr_input_tmp[0, 1] = x_pred[self.model.YAWV]
-        self.gpr_input_tmp[0, 2] = self.u_guess[i * nu]
-        self.gpr_input_tmp[0, 3] = self.u_guess[i * nu + 1]
+        self.gpr_input_tmp[0, 0] = _to_float(x_pred[self.model.LINV])
+        self.gpr_input_tmp[0, 1] = _to_float(x_pred[self.model.YAWV])
+        self.gpr_input_tmp[0, 2] = _to_float(self.u_guess[i * nu])
+        self.gpr_input_tmp[0, 3] = _to_float(self.u_guess[i * nu + 1])
 
         return x_pred
     
     def update_gpr(self, i, nx, nu):
         self.gpr_input_tmp[:, self.gpr_per_feature_size:] = self.gpr_input_tmp[:, :-self.gpr_per_feature_size]
         if self.linear_method == 0:
-            self.gpr_input_tmp[0, 0] = self.xr[self.model.LINV + i * nx]
-            self.gpr_input_tmp[0, 1] = self.xr[self.model.YAWV + i * nx]
-            self.gpr_input_tmp[0, 2] = self.ur[i * nu]
-            self.gpr_input_tmp[0, 3] = self.ur[i * nu + 1]
+            self.gpr_input_tmp[0, 0] = _to_float(self.xr[self.model.LINV + i * nx])
+            self.gpr_input_tmp[0, 1] = _to_float(self.xr[self.model.YAWV + i * nx])
+            self.gpr_input_tmp[0, 2] = _to_float(self.ur[i * nu])
+            self.gpr_input_tmp[0, 3] = _to_float(self.ur[i * nu + 1])
         elif self.linear_method == 1:
-            self.gpr_input_tmp[0, 0] = self.x_guess[self.model.LINV + i * nx]
-            self.gpr_input_tmp[0, 1] = self.x_guess[self.model.YAWV + i * nx]
-            self.gpr_input_tmp[0, 2] = self.u_guess[i * nu]
-            self.gpr_input_tmp[0, 3] = self.u_guess[i * nu + 1]
+            self.gpr_input_tmp[0, 0] = _to_float(self.x_guess[self.model.LINV + i * nx])
+            self.gpr_input_tmp[0, 1] = _to_float(self.x_guess[self.model.YAWV + i * nx])
+            self.gpr_input_tmp[0, 2] = _to_float(self.u_guess[i * nu])
+            self.gpr_input_tmp[0, 3] = _to_float(self.u_guess[i * nu + 1])
         
         # if i == 0:
         #     self.gpr_input_tmp[0, 0] = self.x0[self.model.LINV]
         #     self.gpr_input_tmp[0, 1] = self.x0[self.model.YAWV]
 
+    def _make_solver_options(self):
+        options = {"error_on_fail": False, "print_time": self.opts.print_time}
+        if self.opts.solver == "osqp":
+            options["osqp.verbose"] = 0
+        return options
+
+    def _build_solver(self):
+        qp = {"h": self.H_casadi_sparse}
+        if self.opts.add_delta_constraints:
+            qp["a"] = self.linearMatrix_casadi_sparse
+        return ca.conic("LinearMPC", self.opts.solver, qp, self._make_solver_options())
+
+    @staticmethod
+    def _check_solver_result(solver, solution, context: str) -> None:
+        stats = solver.stats()
+        if not stats.get("success", True):
+            raise RuntimeError(
+                f"{context}: QP solver failed with status "
+                f"'{stats.get('return_status', 'unknown')}'"
+            )
+        controls = np.asarray(solution["x"], dtype=float)
+        if not np.all(np.isfinite(controls)):
+            raise RuntimeError(
+                f"{context}: QP solver returned non-finite values "
+                f"(status '{stats.get('return_status', 'unknown')}')"
+            )
+
     def solve(self):
         # 1. setup the solver
-        if self.opts.add_delta_constraints:
-            qp = {"h" : self.H_casadi_sparse, "a" : self.linearMatrix_casadi_sparse}
-        else:
-            qp = {"h" : self.H_casadi_sparse}
-        
-        opts = {"error_on_fail": False, "print_time": self.opts.print_time}
-        if self.opts.solver == "osqp":
-            opts["osqp.verbose"] = 0
-        solver = ca.conic("LinearMPC", self.opts.solver, qp, opts)
+        solver = self._build_solver()
         
         # 2. first iter, solve and get initial guess for warm start
         if self.first_iter and self.linear_method == 0:
@@ -362,6 +427,7 @@ class LinearMPC:
             if self.opts.add_delta_constraints:
                 args.update(args_append)
             solution = solver(**args)
+            self._check_solver_result(solver, solution, "LinearMPC warm start")
             self.u_guess = np.array(solution["x"])
             x_guess_tmp = self.Aex @ self.x0 + self.Bex @ self.u_guess + self.Cex
             self.x_guess[self.model.nx:] = x_guess_tmp[:-self.model.nx] # still in this time step, first x should still be x0_guess
@@ -384,15 +450,16 @@ class LinearMPC:
         if self.opts.add_delta_constraints:
             args.update(args_append)
         solution = solver(**args)
+        self._check_solver_result(solver, solution, "LinearMPC solve")
         self.u_guess = np.array(solution["x"])
         self.lam_x = solution["lam_x"]
         self.lam_a = solution["lam_a"]
 
         if self.is_gaussian:
-            self.delta_v = (self.x0[self.model.LINV] - self.x_guess_gpr[self.model.LINV]) / self.opts.control_dt
-            self.delta_w = (self.x0[self.model.YAWV] - self.x_guess_gpr[self.model.YAWV]) / self.opts.control_dt
-            self.delta_v_nominal = (self.x0[self.model.LINV] - self.state_prediction_nominal[self.model.LINV]) / self.opts.control_dt
-            self.delta_w_nominal = (self.x0[self.model.YAWV] - self.state_prediction_nominal[self.model.YAWV]) / self.opts.control_dt
+            self.delta_v = (_to_float(self.x0[self.model.LINV]) - _to_float(self.x_guess_gpr[self.model.LINV])) / self.opts.control_dt
+            self.delta_w = (_to_float(self.x0[self.model.YAWV]) - _to_float(self.x_guess_gpr[self.model.YAWV])) / self.opts.control_dt
+            self.delta_v_nominal = (_to_float(self.x0[self.model.LINV]) - _to_float(self.state_prediction_nominal[self.model.LINV])) / self.opts.control_dt
+            self.delta_w_nominal = (_to_float(self.x0[self.model.YAWV]) - _to_float(self.state_prediction_nominal[self.model.YAWV])) / self.opts.control_dt
         self.first_step_nominal_matrices(self.index, self.opts.control_dt)
 
         # 4. record gpr data
@@ -418,21 +485,18 @@ class LinearMPC:
     def prepare(self, dt):
         print("[LinearMPC]: First round, use reference to prepare.")
         tmp = self.linear_method
-        tmp_lagacy = self.gaussian_dict.lagacy
-        self.gaussian_dict.lagacy = False
+        tmp_lagacy = self.gaussian_dict.lagacy if self.gaussian_dict is not None else None
+        if self.gaussian_dict is not None:
+            self.gaussian_dict.lagacy = False
         self.linear_method = 0
         self.setup_matrices(self.index, dt)
         self.setup_bound()
         self.setup_qp_problem()
         self.linear_method = tmp
-        self.gaussian_dict.lagacy = tmp_lagacy
+        if self.gaussian_dict is not None:
+            self.gaussian_dict.lagacy = tmp_lagacy
 
-        if self.opts.add_delta_constraints:
-            qp = {"h" : self.H_casadi_sparse, "a" : self.linearMatrix_casadi_sparse}
-        else:
-            qp = {"h" : self.H_casadi_sparse}
-        opts = {"osqp.verbose": 0, "print_time": self.opts.print_time}
-        solver = ca.conic("LinearMPC", "osqp", qp, opts)
+        solver = self._build_solver()
         args = {
             "h"   : self.H_casadi,
             "g"   : self.gradient,
@@ -447,6 +511,7 @@ class LinearMPC:
         if self.opts.add_delta_constraints:
             args.update(args_append)
         solution = solver(**args)
+        self._check_solver_result(solver, solution, "LinearMPC prepare")
         self.u_guess = np.array(solution["x"])
         self.lam_x = solution["lam_x"]
         self.lam_a = solution["lam_a"]
@@ -473,10 +538,15 @@ class LinearMPC:
     def record_gpr_data(self):
         if self.gpr_file is None:
             return
-        state_v, state_w = self.x0[self.model.LINV], self.x0[self.model.YAWV]
-        control_v, control_w = self.u_guess[0], self.u_guess[1]
-        self.gpr_file.write(str(float(self.delta_v_nominal)) + ' ' + str(float(self.delta_w_nominal)) + ' ' + str(float(state_v)) + ' ' + str(float(state_w)) + 
-                            ' ' + str(float(control_v)) + ' ' + str(float(control_w)) + '\n')
+        values = (
+            _to_float(self.delta_v_nominal),
+            _to_float(self.delta_w_nominal),
+            _to_float(self.x0[self.model.LINV]),
+            _to_float(self.x0[self.model.YAWV]),
+            _to_float(self.u_guess[0]),
+            _to_float(self.u_guess[1]),
+        )
+        self.gpr_file.write(" ".join(str(value) for value in values) + "\n")
     
     def log_data(self):
         self.logger.debug("LinearMPC] Current State: ", self.index)
@@ -498,6 +568,6 @@ class LinearMPC:
         self.logger.empty_line(2)
     
     def save_model(self):
-        if self.is_gaussian and self.gaussian_dict.sparse_method in (2, 3):
+        if self.is_gaussian:
             for i, gp in enumerate(self.model.gaussian_model.gps):
                 gp.save_model("_" + str(i))

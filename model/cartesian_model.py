@@ -71,7 +71,9 @@ class CartesianModel(ModelInterface):
         self.noise_model = GaussianNoiseModel(Q, integral_dt)
 
     def set_predict_traj(self, x_guess: np.ndarray, pred_traj: np.ndarray) -> np.ndarray:
-        return x_guess
+        # x_guess is the flattened predicted state sequence (nx * N); the first
+        # five entries of every state are [x, y, yaw, v, w].
+        return np.asarray(x_guess).reshape(-1, self.nx)[:, :5].copy()
 
 class CartesianDelayModel(CartesianModel):
     def __init__(
@@ -80,7 +82,8 @@ class CartesianDelayModel(CartesianModel):
         tau_v: float = 0.1,
         tau_w: float = 0.1,
         discrete_method:str = 'Euler',
-        Q: np.ndarray | None = None
+        Q: np.ndarray | None = None,
+        **kwargs
     ) -> None:
         self.tau_v = tau_v
         self.tau_w = tau_w

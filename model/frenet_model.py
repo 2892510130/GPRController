@@ -68,6 +68,7 @@ class FrenetModel(ModelInterface):
         self.noise_model = GaussianNoiseModel(Q, integral_dt)
 
     def set_predict_traj(self, x_guess: np.ndarray, pred_traj: np.ndarray) -> np.ndarray:
+        x_guess = np.asarray(x_guess).reshape(-1)
         for i in range(len(x_guess) // self.nx):
             lat_error, yaw_error = x_guess[i * self.nx], x_guess[i * self.nx + 1]
             pred_traj[i, 0] -= np.sin(pred_traj[i, 2]) * lat_error
