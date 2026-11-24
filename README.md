@@ -1,4 +1,5 @@
 > 详细使用指南、配置说明和测试说明见 [GUIDE.md](GUIDE.md)。
+> 如果要转到 C++/ROS 版本，跨项目经验包见 [agent_handoff/README.md](agent_handoff/README.md)。
 
 ## How to run?
 
