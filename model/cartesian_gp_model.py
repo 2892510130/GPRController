@@ -47,8 +47,11 @@ class CartesianGaussianModel(ModelInterface):
         linear_method: int = 0,
         x_var: np.ndarray | None = None,
         gpr_method: int = 0,
+        m_curvature: float = 0.0,
         compute_dvar_dx: bool = False
     ) -> np.ndarray:
+        # m_curvature is accepted for interface compatibility with the Frenet
+        # models (and with LinearMPC); the Cartesian models do not use it.
         self.A = np.zeros((self.nx, self.nx))
         self.B = np.zeros((self.nx, self.nu))
         self.C = np.zeros((self.nx, 1))
@@ -89,7 +92,9 @@ class CartesianGaussianModel(ModelInterface):
         self.noise_model = GaussianNoiseModel(Q, integral_dt)
     
     def set_predict_traj(self, x_guess: np.ndarray, pred_traj: np.ndarray) -> np.ndarray:
-        return x_guess
+        # x_guess is the flattened predicted state sequence (nx * N); the first
+        # five entries of every state are [x, y, yaw, v, w].
+        return np.asarray(x_guess).reshape(-1, self.nx)[:, :5].copy()
 
 class AugmentedCartesianGaussianModel(ModelInterface):
     def __init__(
@@ -138,8 +143,11 @@ class AugmentedCartesianGaussianModel(ModelInterface):
         linear_method: int = 0,
         x_var: np.ndarray | None = None,
         gpr_method: int = 0,
+        m_curvature: float = 0.0,
         compute_dvar_dx: bool = False
     ) -> np.ndarray:
+        # m_curvature is accepted for interface compatibility with the Frenet
+        # models (and with LinearMPC); the Cartesian models do not use it.
         self.A = np.zeros((self.nx, self.nx))
         self.B = np.zeros((self.nx, self.nu))
         self.C = np.zeros((self.nx, 1))
@@ -183,6 +191,9 @@ class AugmentedCartesianGaussianModel(ModelInterface):
             self.C[3] -= (gpr_input @ self.dmu_dv).squeeze()
             self.C[4] -= (gpr_input @ self.dmu_dw).squeeze()
 
+            if compute_dvar_dx is True:
+                self.compute_variance_aware(mask, mask2)
+
         self.A, self.B, self.C = self.discrete_method.discretize(self.A, self.B, self.C)
         self.A[5:, :] = 0
 
@@ -207,12 +218,25 @@ class AugmentedCartesianGaussianModel(ModelInterface):
 
     def get_gradient(self, gpr_input: np.ndarray) -> None:
         self.dmu_dv, self.dmu_dw = self.gaussian_model.dmu_dx(gpr_input)
-    
+
+    def compute_variance_aware(self, mask: np.ndarray, mask2: np.ndarray) -> None:
+        self.A_sigma_v = np.zeros((1, self.nx))
+        self.B_sigma_v = np.zeros((1, self.nu))
+        self.A_sigma_w = np.zeros((1, self.nx))
+        self.B_sigma_w = np.zeros((1, self.nu))
+        self.A_sigma_v[0, 3:3+2*self.input_window] += self.gaussian_model_v.dvar_dx_data[mask].squeeze()
+        self.A_sigma_v[0, 3+2*self.input_window:] += self.gaussian_model_v.dvar_dx_data[~mask2].squeeze()
+        self.A_sigma_w[0, 3:3+2*self.input_window] += self.gaussian_model_w.dvar_dx_data[mask].squeeze()
+        self.A_sigma_w[0, 3+2*self.input_window:] += self.gaussian_model_w.dvar_dx_data[~mask2].squeeze()
+
+        self.B_sigma_v[0, :] += self.gaussian_model_v.dvar_dx_data[2:4].squeeze()
+        self.B_sigma_w[0, :] += self.gaussian_model_w.dvar_dx_data[2:4].squeeze()
+
     def create_noise_model(self, Q: np.ndarray, integral_dt: float) -> None:
         if Q is None:
             Q = np.diag([0.01, 0.01, 0.01, 0.1, 0.1])
         self.noise_model = GaussianNoiseModel(Q, integral_dt)
     
     def set_predict_traj(self, x_guess: np.ndarray, pred_traj: np.ndarray) -> np.ndarray:
-        pred_traj = x_guess.reshape(-1, self.nx)
-        return pred_traj[:, :5]
+        pred_traj = np.asarray(x_guess).reshape(-1, self.nx)
+        return pred_traj[:, :5].copy()

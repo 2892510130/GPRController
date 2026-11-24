@@ -17,12 +17,21 @@ class LinearMPC:
             gaussian_opts=self.gaussian_dict
         )
 
-        if "Gaussian" in self.model.name:
+        self.is_gaussian = "Gaussian" in self.model.name
+        if self.opts.variance_aware and not hasattr(self.model, "compute_variance_aware"):
+            raise ValueError(
+                "variance_aware=True is only supported by the augmented Gaussian "
+                f"models, got model '{self.opts.model}'"
+            )
+
+        self.gpr_file = None
+        if self.is_gaussian:
             self.gpr_input = np.zeros((1, self.model.feature_size))
             self.gpr_per_feature_size = 4
             self.x_guess_gpr = np.zeros((self.model.nx, 1))
-            self.augmented_x0 = np.zeros((self.model.YAWV + 1 + (self.model.input_window - 1) * 2, 1))
-            self.augmented_u0 = np.zeros(((self.model.input_window - 1) * 3, 1))
+            if "Augmented" in self.model.name:
+                self.augmented_x0 = np.zeros((self.model.YAWV + 1 + (self.model.input_window - 1) * 2, 1))
+                self.augmented_u0 = np.zeros(((self.model.input_window - 1) * 3, 1))
             if self.opts.variance_aware:
                 self.A_sigma = np.zeros((1, self.model.nx * self.opts.mpcWindow))
                 self.B_sigma = np.zeros((1, self.model.nu * self.opts.mpcWindow))
@@ -39,7 +48,7 @@ class LinearMPC:
         self.first_iter = True
         self.record_start = False
 
-        if self.opts.record_data == True:
+        if self.opts.record_data and self.is_gaussian:
             self.gpr_file = open(self.opts.record_data_path, 'w')
 
     def initialize(self, cur_state, dt):
@@ -63,7 +72,7 @@ class LinearMPC:
         elif "Frenet" in self.model.name:
             x0[0], x0[1], x0[2], x0[3] = self.lat_error, self.head_error, cur_state[3], cur_state[4]
 
-        if "Gaussian" in self.model.name:
+        if self.is_gaussian:
             self.gpr_input_tmp = self.gpr_input.copy()
             self.gpr_input_step_1 = self.gpr_input.copy()
             self.gpr_input[:, self.gpr_per_feature_size:] = self.gpr_input[:, :-self.gpr_per_feature_size]
@@ -112,11 +121,7 @@ class LinearMPC:
         nx, nu = self.model.nx, self.model.nu
         self.model.set_reference(self.xr[0 : nx], self.ur[0 : nu])
         self.model.set_guess(self.x_guess[0 : nx], self.u_guess[0 : nu])
-        if self.model.name == "Kinematic Cartesian":
-            self.model.create_discrete_model(dt, self.linear_method)
-        elif self.model.name == "Kinematic Frenet":
-            self.model.create_discrete_model(dt, self.path[index, 3], self.linear_method) # Give the curvature
-        elif "Gaussian" in self.model.name:
+        if self.is_gaussian:
             self.model.create_discrete_model(
                 dt, 
                 self.gpr_input_tmp, 
@@ -124,6 +129,10 @@ class LinearMPC:
                 gpr_method = -1, 
                 m_curvature = self.path[index, 3]
             )
+        elif "Cartesian" in self.model.name:
+            self.model.create_discrete_model(dt, self.linear_method)
+        elif "Frenet" in self.model.name:
+            self.model.create_discrete_model(dt, self.path[index, 3], self.linear_method) # Give the curvature
         
         self.state_prediction_nominal = self.model.A @ self.x0 + self.model.B @ self.u_guess[0 : nu] + self.model.C
 
@@ -143,11 +152,7 @@ class LinearMPC:
         for i in range(N):
             self.model.set_reference(self.xr[i * nx : (i+1) * nx], self.ur[i * nu : (i+1) * nu])
             self.model.set_guess(self.x_guess[i * nx : (i+1) * nx], self.u_guess[i * nu : (i+1) * nu])
-            if self.model.name == "Kinematic Cartesian":
-                self.model.create_discrete_model(dt, self.linear_method)
-            elif self.model.name == "Kinematic Frenet":
-                self.model.create_discrete_model(dt, self.path[index, 3], self.linear_method) # Give the curvature
-            elif "Gaussian" in self.model.name:
+            if self.is_gaussian:
                 if self.gaussian_dict.lagacy:
                     x_pred = self.update_gpr_lagacy(i, nx, nu, x_pred)
                 else:
@@ -179,6 +184,10 @@ class LinearMPC:
                 if self.opts.variance_aware and i < self.opts.aware_len:
                     self.A_sigma[0, i * nx : (i+1) * nx] = self.opts.lambda_var[0] * self.model.A_sigma_v + self.opts.lambda_var[1] * self.model.A_sigma_w
                     self.B_sigma[0, i * nu : (i+1) * nu] = self.opts.lambda_var[0] * self.model.B_sigma_v + self.opts.lambda_var[1] * self.model.B_sigma_w
+            elif "Cartesian" in self.model.name:
+                self.model.create_discrete_model(dt, self.linear_method)
+            elif "Frenet" in self.model.name:
+                self.model.create_discrete_model(dt, self.path[index, 3], self.linear_method) # Give the curvature
 
             if i == 0:
                 self.Aex[i * nx : (i + 1) * nx, :] = self.model.A
@@ -379,18 +388,19 @@ class LinearMPC:
         self.lam_x = solution["lam_x"]
         self.lam_a = solution["lam_a"]
 
-        self.delta_v = (self.x0[self.model.LINV] - self.x_guess_gpr[self.model.LINV]) / self.opts.control_dt
-        self.delta_w = (self.x0[self.model.YAWV] - self.x_guess_gpr[self.model.YAWV]) / self.opts.control_dt
-        self.delta_v_nominal = (self.x0[self.model.LINV] - self.state_prediction_nominal[self.model.LINV]) / self.opts.control_dt
-        self.delta_w_nominal = (self.x0[self.model.YAWV] - self.state_prediction_nominal[self.model.YAWV]) / self.opts.control_dt
+        if self.is_gaussian:
+            self.delta_v = (self.x0[self.model.LINV] - self.x_guess_gpr[self.model.LINV]) / self.opts.control_dt
+            self.delta_w = (self.x0[self.model.YAWV] - self.x_guess_gpr[self.model.YAWV]) / self.opts.control_dt
+            self.delta_v_nominal = (self.x0[self.model.LINV] - self.state_prediction_nominal[self.model.LINV]) / self.opts.control_dt
+            self.delta_w_nominal = (self.x0[self.model.YAWV] - self.state_prediction_nominal[self.model.YAWV]) / self.opts.control_dt
         self.first_step_nominal_matrices(self.index, self.opts.control_dt)
 
         # 4. record gpr data
-        if self.opts.record_data and self.first_iter is False:
+        if self.is_gaussian and self.opts.record_data and self.first_iter is False:
             self.record_gpr_data()
 
         # 5. update gpr input
-        if "Gaussian" in self.model.name:
+        if self.is_gaussian:
             self.update_gp_model()
 
         self.x_guess = self.Aex @ self.x0 + self.Bex @ self.u_guess + self.Cex
@@ -442,9 +452,11 @@ class LinearMPC:
         self.lam_a = solution["lam_a"]
         x_guess_tmp = self.Aex @ self.x0 + self.Bex @ self.u_guess + self.Cex
         self.x_guess[self.model.nx:] = x_guess_tmp[:-self.model.nx] # still in this time step, first x should still be x0
-        if "Gaussian" in self.model.name: self.gpr_input_tmp = self.gpr_input.copy() # should not change the gpr input
+        if self.is_gaussian: self.gpr_input_tmp = self.gpr_input.copy() # should not change the gpr input
 
     def update_gp_model(self):
+        if not self.is_gaussian:
+            return
         self.gpr_input[:, 0] = self.x0[self.model.LINV]
         self.gpr_input[:, 1] = self.x0[self.model.YAWV]
         self.gpr_input[:, 2] = self.u_guess[0]
@@ -459,6 +471,8 @@ class LinearMPC:
                     gp.add_new_inducing_quick(self.gpr_input.copy())
 
     def record_gpr_data(self):
+        if self.gpr_file is None:
+            return
         state_v, state_w = self.x0[self.model.LINV], self.x0[self.model.YAWV]
         control_v, control_w = self.u_guess[0], self.u_guess[1]
         self.gpr_file.write(str(float(self.delta_v_nominal)) + ' ' + str(float(self.delta_w_nominal)) + ' ' + str(float(state_v)) + ' ' + str(float(state_w)) + 
@@ -466,13 +480,14 @@ class LinearMPC:
     
     def log_data(self):
         self.logger.debug("LinearMPC] Current State: ", self.index)
-        self.logger.debug("LinearMPC] Delta State Nominal: ", [float(self.delta_v_nominal), float(self.delta_w_nominal)])
-        self.logger.debug("LinearMPC] Delta State GPR: ", [float(self.delta_v), float(self.delta_w)])
-        self.logger.debug("LinearMPC] GPR Input: ", [float(i) for i in self.gpr_input_step_1.squeeze()])
+        if self.is_gaussian:
+            self.logger.debug("LinearMPC] Delta State Nominal: ", [float(self.delta_v_nominal), float(self.delta_w_nominal)])
+            self.logger.debug("LinearMPC] Delta State GPR: ", [float(self.delta_v), float(self.delta_w)])
+            self.logger.debug("LinearMPC] GPR Input: ", [float(i) for i in self.gpr_input_step_1.squeeze()])
         self.logger.debug("LinearMPC] Matrix C:\n", self.Cex[:self.model.nx].squeeze())
         self.logger.debug("LinearMPC] Last Command: ", self.last_command.squeeze())
 
-        if self.gaussian_dict.sparse_method == 2 or self.gaussian_dict.sparse_method == 3:
+        if self.is_gaussian and self.gaussian_dict.sparse_method in (2, 3):
             for i, gp in enumerate(self.model.gaussian_model.gps):
                 self.logger.debug(f"LinearMPC] GPR {i} Inducing Size: ", gp.U.shape)
                 self.logger.debug(f"LinearMPC] GPR {i} predict test: ", gp.predict_noiseless(gp.X[0].reshape(1, -1), full_cov = True))
@@ -483,6 +498,6 @@ class LinearMPC:
         self.logger.empty_line(2)
     
     def save_model(self):
-        if self.gaussian_dict.sparse_method == 2 or self.gaussian_dict.sparse_method == 3:
+        if self.is_gaussian and self.gaussian_dict.sparse_method in (2, 3):
             for i, gp in enumerate(self.model.gaussian_model.gps):
                 gp.save_model("_" + str(i))

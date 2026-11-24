@@ -65,8 +65,8 @@ sim:
   control_dt:            0.05
   tau_scale:             8.0 # 5.0
 
-  filter_feq_v:          25.0
-  filter_feq_w:          25.0
+  filter_feq_v:          5.0 # Hz, must stay below the Nyquist frequency (1 / (2 * control_dt) = 10 Hz)
+  filter_feq_w:          5.0
           
   add_noise:             true
   add_filter:            false

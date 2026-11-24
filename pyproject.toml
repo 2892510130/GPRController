@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gprcontroller"
+version = "0.1.0"
+description = "Gaussian process regression augmented linear MPC for path tracking"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.26.4",
+    "casadi>=3.6.7",
+    "GPy>=1.13.2",
+    "matplotlib>=3.9.1",
+    "PyYAML>=6.0.1",
+    "scipy>=1.12.0",
+    "colorama>=0.4.6",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.setuptools]
+packages = [
+    "controller",
+    "model",
+    "play",
+    "train",
+    "trajectory",
+    "utils",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["test"]

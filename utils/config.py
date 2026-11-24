@@ -197,8 +197,11 @@ class Config:
         return cls(**config_data)
     
     def __post_init__(self):
-        if hasattr(self.mpc, "control_dt") and np.abs(self.mpc.control_dt - self.sim.control_dt) > 1e-6:
-            raise ValueError("control dt should be same in sim and mpc!")
+        # Sections are optional: a config may only describe the MPC / Gaussian
+        # model (e.g. when building a model for tests) without a simulation.
+        if self.mpc is not None and self.sim is not None:
+            if np.abs(self.mpc.control_dt - self.sim.control_dt) > 1e-6:
+                raise ValueError("control dt should be same in sim and mpc!")
 
 @dataclass
 class TrainConfig:
