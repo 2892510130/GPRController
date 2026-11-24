@@ -199,9 +199,9 @@ def test_non_gaussian_controller_without_gaussian_section(monkeypatch):
     assert np.all(np.isfinite(u))
 
 
-def test_augmented_models_require_input_window_three():
+def test_augmented_models_require_at_least_two_steps():
     config = _config("Kinematic Augmented Frenet Gaussian", 12)
-    config.gaussian.input_window = 4
+    config.gaussian.input_window = 1
 
     path, speed_profile = _circle_path()
     with pytest.raises(ValueError, match="input_window"):

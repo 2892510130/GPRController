@@ -23,11 +23,11 @@ class LinearMPC:
         if "Augmented" in self.opts.model:
             if self.gaussian_dict is None:
                 raise ValueError("Augmented models require a gaussian config section")
-            if self.gaussian_dict.input_window != 3:
+            if self.gaussian_dict.input_window < 2:
                 raise ValueError(
-                    "Augmented models currently require gaussian.input_window == 3 "
-                    f"(got {self.gaussian_dict.input_window}); the augmented state "
-                    "layout is hard-coded for a three-step history."
+                    "Augmented models require gaussian.input_window >= 2 "
+                    f"(got {self.gaussian_dict.input_window}); one-step models "
+                    "have no history state to augment."
                 )
 
         if self.opts.variance_aware:
@@ -66,8 +66,10 @@ class LinearMPC:
             self.gpr_per_feature_size = 4
             self.x_guess_gpr = np.zeros((self.model.nx, 1))
             if "Augmented" in self.model.name:
+                # Base state + two history values (v, w) per extra window step.
                 self.augmented_x0 = np.zeros((self.model.YAWV + 1 + (self.model.input_window - 1) * 2, 1))
-                self.augmented_u0 = np.zeros(((self.model.input_window - 1) * 3, 1))
+                # Current control (2) + two history controls per extra step.
+                self.augmented_u0 = np.zeros((2 * self.model.input_window, 1))
             if self.opts.variance_aware:
                 self.A_sigma = np.zeros((1, self.model.nx * self.opts.mpcWindow))
                 self.B_sigma = np.zeros((1, self.model.nu * self.opts.mpcWindow))

@@ -110,6 +110,11 @@ class AugmentedFrenetGaussianModel(ModelInterface):
         self.LINV = 2
         self.YAWV = 3
         self.input_window = gaussian_opts.input_window
+        if self.input_window < 2:
+            raise ValueError(
+                "AugmentedFrenetGaussianModel requires gaussian.input_window >= 2, "
+                f"got {self.input_window}"
+            )
         self.discrete_method = DiscreteMethods[discrete_method](integral_dt)
         self.create_noise_model(Q, integral_dt)
         self.build_guassian_model(gaussian_opts, test = gaussian_opts.enable_test)
@@ -127,13 +132,31 @@ class AugmentedFrenetGaussianModel(ModelInterface):
         if test:
             test_gaussian_model(self.gaussian_model)
 
-    def change_vector_to_model2(self, x: np.ndarray, u: np.ndarray) -> Tuple[np.ndarray]:
+    def change_vector_to_model2(self, x: np.ndarray, u: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Map (state buffer, control buffer) to (augmented state, current u).
+
+        x holds the base state followed by (v, w) history; u holds the current
+        control (2) followed by the history controls. Together they must fill
+        the augmented state exactly (this used to rely on a W == 3 happy path).
+        """
+        x = np.asarray(x, dtype=float).reshape(-1, 1)
+        u = np.asarray(u, dtype=float).reshape(-1, 1)
+        if u.shape[0] < 2:
+            raise ValueError(
+                "change_vector_to_model2: control buffer must hold at least 2 "
+                f"entries, got {u.shape[0]}"
+            )
+        history = u[2:]
+        if x.shape[0] + history.shape[0] != self.nx:
+            raise ValueError(
+                "change_vector_to_model2: state buffer "
+                f"({x.shape[0]}) + control history ({history.shape[0]}) must "
+                f"equal nx ({self.nx}); check the augmented buffers / input_window."
+            )
         new_x = np.zeros((self.nx, 1))
-        new_u = np.zeros((2, 1))
         new_x[:x.shape[0]] = x
-        new_x[x.shape[0]:] = u[2:]
-        new_u = u[:2]
-        return new_x, new_u
+        new_x[x.shape[0]:] = history
+        return new_x, u[:2].copy()
     
     def create_discrete_model(
         self,

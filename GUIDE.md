@@ -328,12 +328,13 @@ gaussian:
 | `Kinematic Cartesian` | 5 | `[x, y, yaw, v, w]` |
 | `Kinematic Cartesian Delay` | 5 | 一阶延迟模型：`v_dot=(u_v-v)/τ_v`，`w_dot=(u_w-w)/τ_w` |
 | `Kinematic Cartesian Gaussian` | 5 | Cartesian + GP 残差（零阶或一阶） |
-| `Kinematic Augmented Cartesian Gaussian` | 13 | 带 2 步历史（`input_window=3`）的 augmented 状态 |
+| `Kinematic Augmented Cartesian Gaussian` | `5 + 4(W-1)` | 含 `W-1` 步状态/控制历史的 augmented 状态（`W=input_window>=2`）；`W=3` 时为 13 |
 | `Kinematic Frenet` | 4 | `[e_y, e_phi, v, w]` 误差坐标 |
 | `Kinematic Frenet Gaussian` | 4 | Frenet + GP 残差 |
-| `Kinematic Augmented Frenet Gaussian` | 12 | augmented 状态，`input_window` 必须为 3 |
+| `Kinematic Augmented Frenet Gaussian` | `4 + 4(W-1)` | 同上，`W=3` 时为 12 |
 
-> augmented 布局目前**硬编码为 3 步历史**。`gaussian.input_window != 3` 时 `LinearMPC` 会给出明确 `ValueError`（P2 加的断言）。
+> augmented 状态维度为 `base_nx + 4*(W-1)`，历史状态/控制 buffer 按 `W` 通用组装；`W>=2` 均可使用（回归测试覆盖 `W=2` 与 `W=4`）。`input_window=1` 没有历史可加，会明确报错。
+> 模型层的 A/B/C 与 `LinearMPC` 的 `augmented_x0/u0` 现在保持一致；窗口越大，`Q/Q_final` 长度与训练特征维度（`4*W`）也要同步增大。
 > 闭环仿真只支持 Cartesian 的 `sim_model`；Frenet 仿真模型缺少 `kappa` 参数，不支持。
 
 ### 6.2 GP 模式（`gpr_method`）
@@ -427,7 +428,7 @@ gaussian:
 | `save_path` / `load_path` | GP 模型缓存的路径前缀（实际文件为 `<prefix>_0.npy`、`<prefix>_1.npy`） |
 | `total_data_number` | 训练样本数（不含诱导行） |
 | `inducing_data_number` | 每个 GP 的诱导点数（文件里共 2 组） |
-| `input_window` | 历史窗口长度；特征维数 = `4 * input_window` |
+| `input_window` | 历史窗口长度；特征维数 = `4 * input_window`；augmented 模型要求 >= 2 |
 | `gpr_method` | `-1` / `0` / `1`（见 6.2） |
 | `sparse_method` | `0/2` DTC、`1/3` FITC（见 6.3） |
 | `normalize_y` | 是否标准化 GP 输出 |
@@ -529,7 +530,7 @@ raw 6 列数据
 运行：
 
 ```bash
-python -m pytest -q                 # 全量（约 3 秒，53 个测试）
+python -m pytest -q                 # 全量（约 3 秒，58 个测试）
 python -m pytest test/test_gp_persistence.py -v
 python -m pytest -k variance        # 按名称过滤
 ```
@@ -550,7 +551,8 @@ python -m pytest -k variance        # 按名称过滤
 | `test_gp_kernel.py` | 快速 numpy RBF 核/Kdiag 与 GPy 对齐；解析 `dk_dx` 与 GPy `dK_dX2` 对齐；`dmu_dx` 与有限差分对齐；批量输入被拒绝 |
 | `test_gp_persistence.py` | FITC（normalize 开/关）与 DTC 保存/加载往返；quick 模式：cholesky 被拒绝 + `sync_cholesky` 恢复；quick 状态保存/加载；完整 `add_new_inducing` 后保存/加载；核超参/normalize/sparse 类型不匹配被拒绝；旧扁平 `.npy` 兼容 |
 | `test_noise_model.py` | 过程噪声经验协方差 ≈ `Q·dt`；零 Q 返回零噪声；非法 dt/非方阵/非半正定 Q 被拒绝 |
-| `test_controller_models.py` | 7 种模型族的 `initialize + solve`（含 `Kinematic Cartesian Delay`）；variance-aware 两种 augmented 模型；variance-aware 非法组合报错；augmented `input_window != 3` 报错；solver 失败/非有限检查；solver 缓存复用；无 gaussian section 的普通模型可运行 |
+| `test_controller_models.py` | 7 种模型族的 `initialize + solve`（含 `Kinematic Cartesian Delay`）；variance-aware 两种 augmented 模型；variance-aware 非法组合报错；augmented `input_window=1` 报错；solver 失败/非有限检查；solver 缓存复用；无 gaussian section 的普通模型可运行 |
+| `test_augmented_input_window.py` | augmented 模型在 `input_window=2/4` 下（Frenet + Cartesian）可构造、求解并返回正确形状；`change_vector_to_model2` 对不一致 buffer 明确报错 |
 | `test_simulation_runner.py` | `sim.start_index` 把车辆放到赛道对应点，且能正常跑一步 |
 
 测试不访问网络；GP 相关测试使用 `log/processed_data/linear_mpc_frenet.txt` 和 `config/track/full_track_opt.yaml`。
@@ -611,8 +613,8 @@ pstats.Stats(pr).sort_stats("cumtime").print_stats(15)
 **Q5: `ValueError: Unknown config section(s) ...`**
 `Config.from_yaml` 现在只接受 `mpc/gaussian/traj/sim`。删除拼错的顶层 key，或改成合法 section。
 
-**Q6: `ValueError: Augmented models currently require gaussian.input_window == 3`**
-augmented 状态布局是 3 步历史硬编码；把 `input_window` 设为 3，或改用非 augmented 模型。
+**Q6: `ValueError: Augmented models require gaussian.input_window >= 2`**
+augmented 模型需要至少 2 步历史（`W-1 >= 1`）。把 `input_window` 设为 >=2（常用 3）；同时保证训练数据特征维度为 `4*input_window`、`Q/Q_final` 长度等于 `base_nx + 4*(W-1)`。
 
 **Q7: `ValueError: LPFilter: cutoff_freq ... must be in (0, ...)`**
 低通截止频率必须小于 Nyquist（`1/(2·dt)`）。例如 `dt=0.05` 时上限 10 Hz，配置用 5 Hz。
@@ -636,7 +638,7 @@ augmented 状态布局是 3 步历史硬编码；把 `input_window` 设为 3，�
 
 ## 13. 已知限制与后续方向
 
-- augmented 模型只支持 `input_window == 3`（已加显式断言，便于定位）。
+- augmented 模型支持 `input_window >= 2`（`W=1` 明确报错）；窗口越大，特征维度和 QP 状态维度越高，需要同步调整训练数据与 `Q/Q_final` 长度。
 - `play/mpc_closed_loop.py` 中的赛道路径仍写死为 `config/track/full_track_opt.yaml`；换赛道需要改代码或用自定义 runner。
 - `play/mpc.py` 现在是 `test_mpc_closed_loop(visualize=2)` 的薄 wrapper；旧的“整段 horizon 回放 + 交互输入”调试模式已移除。
 - `remove_inducing()` 未实现（显式 `NotImplementedError`）。
