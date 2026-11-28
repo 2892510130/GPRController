@@ -69,13 +69,33 @@ def main() -> None:
     fig, axes = plt.subplots(2, 2, figsize=(11, 8))
     order = [0, 2, 1, 3]  # before, bijl / osvgp, agp  -> matches 2x2 layout
 
-    for ax, idx in zip(axes.ravel(), order):
+    results = []
+    lo, hi = np.inf, -np.inf
+    for idx in order:
         method, title = PANELS[idx]
         x, y, x_up, y_up, gp, exact = run(case, method, args.incremental)
         mu, var = predict(exact, gp, grid)
         std = np.sqrt(np.maximum(var, 0.0))
-        if gp is not None:
-            ax.plot(gp.U, np.zeros_like(gp.U[:, 0]) - 6, "ob", ms=4, label="Inducing")
+        results.append((method, title, x, y, x_up, y_up, gp, exact, mu, std))
+        lo = min(lo, float(np.asarray(y).min()), float(np.asarray(y_up).min()),
+                 float(mu.min()), float(np.percentile(mu - 2 * std, 2)))
+        hi = max(hi, float(np.asarray(y).max()), float(np.asarray(y_up).max()),
+                 float(mu.max()), float(np.percentile(mu + 2 * std, 98)))
+    pad = 0.06 * (hi - lo)
+    ylim = (lo - pad, hi + pad)
+    print(f"  shared ylim = ({ylim[0]:+.1f}, {ylim[1]:+.1f})")
+
+    for ax, (method, title, x, y, x_up, y_up, gp, exact, mu, std) in zip(axes.ravel(), results):
+
+        x0 = np.asarray(x).reshape(-1)
+        y0 = np.asarray(y).reshape(-1)
+        u0 = x0[::5]
+        ax.plot(u0, y0[::5], "ob", ms=4.5, mew=1.0, label="Inducing data")
+        if gp is not None and gp.M > len(u0):
+            extra = np.asarray(gp.U[len(u0):, 0], dtype=float)
+            ax.plot(extra, np.interp(extra, np.asarray(x_up).reshape(-1),
+                                     np.asarray(y_up).reshape(-1)),
+                    "^b", ms=4.5, label="Added inducing")
         ax.plot(x, y, "xk", ms=5, mew=1.2, label="Training data")
         ax.plot(x_up, y_up, ".", color="0.55", ms=3, label="Update data")
         ax.plot(grid, mu, "r", lw=1.2, label="Mean")
@@ -83,7 +103,7 @@ def main() -> None:
                         color="red", alpha=0.15, label=r"$\pm 2\sigma$")
         ax.set_title(title, fontsize=10)
         ax.set_xlim(-5, 25)
-        ax.set_ylim(-8, 12)
+        ax.set_ylim(*ylim)
         ax.set_xlabel("$x$")
         ax.set_ylabel("$y$")
     axes[0, 0].legend(fontsize=7, loc="upper left")
