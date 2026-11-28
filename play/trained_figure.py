@@ -49,11 +49,13 @@ def main() -> None:
                          "legend.frameon": False, "axes.linewidth": 0.8})
     fig, axes = plt.subplots(1, 2, figsize=(11, 4.2))
 
-    lo = min(float(np.asarray(y).min()), float(mu_u.min() - 2 * np.sqrt(var_u).min()),
-             float(mu_t.min() - 2 * np.sqrt(var_t).max()))
-    hi = max(float(np.asarray(y).max()), float(mu_u.max() + 2 * np.sqrt(var_u).max()),
-             float(mu_t.max() + 2 * np.sqrt(var_t).max()))
-    pad = 0.06 * (hi - lo)
+    # outside [0, 20] the trained model has a huge prior variance (std ~ 50), so
+    # its mean and band explode; the view is restricted to the data region
+    x_lo, x_hi = -1.0, 21.0
+    inside = (grid[:, 0] >= x_lo) & (grid[:, 0] <= x_hi)
+    lo = min(float(np.asarray(y).min()), float(mu_u[inside].min()), float(mu_t[inside].min()))
+    hi = max(float(np.asarray(y).max()), float(mu_u[inside].max()), float(mu_t[inside].max()))
+    pad = 0.08 * (hi - lo)
     ylim = (lo - pad, hi + pad)
 
     panels = ((axes[0], mu_u, var_u, np.asarray(u).reshape(-1),
@@ -68,7 +70,7 @@ def main() -> None:
         ax.fill_between(grid.ravel(), mu - 2 * std, mu + 2 * std,
                         color="red", alpha=0.15, label=r"$\pm 2\sigma$")
         ax.set_title(title, fontsize=10)
-        ax.set_xlim(-5, 25)
+        ax.set_xlim(x_lo, x_hi)
         ax.set_ylim(*ylim)
         ax.set_xlabel("$x$")
         ax.set_ylabel("$y$")
