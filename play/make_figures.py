@@ -20,6 +20,8 @@ STYLE = {
 }
 
 plt.rcParams.update({
+    "font.family": "Microsoft YaHei",
+    "axes.unicode_minus": False,
     "font.size": 9,
     "axes.linewidth": 0.8,
     "xtick.major.width": 0.8,
@@ -41,8 +43,8 @@ def figure_traj(scenario: str, runs, labels, out: str) -> None:
         data = load(scenario, run)
         ref = data["ref"]
         sim = data["sim_path"]
-        ax.plot(ref[:, 0], ref[:, 1], **STYLE["ref"], label="reference")
-        ax.plot(sim[:, 0], sim[:, 1], **STYLE["sim"], label="vehicle")
+        ax.plot(ref[:, 0], ref[:, 1], **STYLE["ref"], label="参考轨迹")
+        ax.plot(sim[:, 0], sim[:, 1], **STYLE["sim"], label="车辆轨迹")
         ax.scatter([sim[0, 0]], [sim[0, 1]], s=18, c="k", marker="o", zorder=5)
         ax.set_title(label, fontsize=9)
         ax.set_aspect("equal")
@@ -59,11 +61,11 @@ def figure_err(scenario: str, runs, labels, out: str) -> None:
     for ax, run, label in zip(axes, runs, labels):
         state = load(scenario, run)["state"]
         t = np.arange(state.shape[0]) * 0.05
-        ax.plot(t, state[:, 0], **STYLE["lat"], label="lateral error")
-        ax.plot(t, state[:, 1], **STYLE["head"], label="heading error")
+        ax.plot(t, state[:, 0], **STYLE["lat"], label="横向误差")
+        ax.plot(t, state[:, 1], **STYLE["head"], label="航向误差")
         ax.set_title(label, fontsize=9)
         ax.set_xlabel("$t$ (s)")
-        ax.set_ylabel("error")
+        ax.set_ylabel("误差")
         ax.set_ylim(-0.25, 0.25)
     axes[0].legend(loc="upper right", fontsize=7)
     fig.tight_layout()
@@ -78,7 +80,7 @@ def main() -> None:
     os.makedirs(args.outdir, exist_ok=True)
 
     runs = ["nominal", "gp0", "gp1"]
-    labels = ["Nominal MPC", "Zero-order GP-MPC", "First-order GP-MPC"]
+    labels = ["名义模型", "零阶 GP-MPC", "一阶 GP-MPC"]
     for scenario, tag in (("delay", "delay"), ("bad_wheel", "badwheel")):
         figure_traj(scenario, runs, labels, os.path.join(args.outdir, f"sim_traj_{tag}.pdf"))
         figure_err(scenario, runs, labels, os.path.join(args.outdir, f"sim_err_{tag}.pdf"))
