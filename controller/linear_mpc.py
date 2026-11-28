@@ -569,18 +569,39 @@ class LinearMPC:
                     # forgetting + marginal-contribution based add / prune
                     gp.update(z_prev, residual)
                     budget = 2 * int(self.gaussian_dict.inducing_data_number)
-                    var, aa = gp.check_new_inducing_var(self.gpr_input.copy())
-                    if var > aa * 0.01 and gp.M < budget:
+                    if self._should_add_inducing(gp, budget):
                         gp.add_new_inducing(self.gpr_input.copy())
                     elif gp.M >= budget:
                         gp.remove_inducing(int(np.argmin(gp.contributions())))
                 else:
                     gp.update(z_prev, residual)
         if self.gaussian_dict.add_mu_su is True:
+            budget = 10 * self.gaussian_dict.inducing_data_number
             for gp in self.model.gaussian_model.gps:
-                var, aa = gp.check_new_inducing_var(self.gpr_input.copy())
-                if var > aa * 0.01 and gp.M <= 10 * self.gaussian_dict.inducing_data_number:
+                if self._should_add_inducing(gp, budget):
                     gp.add_new_inducing_quick(self.gpr_input.copy())
+
+    def _should_add_inducing(self, gp, max_points: int) -> bool:
+        """Inducing-point trigger.
+
+        ``inducing_criterion = "subspace"`` (default) reproduces the original
+        rule: the residual variance of the inducing subspace relative to the
+        prior variance exceeds 1%.  ``"variance"`` instead compares the posterior
+        predictive variance at the query with the mean posterior variance over
+        the training inputs, which reacts to any shift of the operating point
+        (including a change of the curvature sign) rather than only to large
+        extrapolation in kernel distance.
+        """
+        if gp.M >= max_points:
+            return False
+        criterion = getattr(self.gaussian_dict, "inducing_criterion", "subspace")
+        z = self.gpr_input.copy()
+        if criterion == "variance":
+            _, var = gp.predict_noiseless(z, full_cov=False)
+            ratio = float(np.asarray(var).reshape(-1)[0]) / max(getattr(gp, "var_ref", 1.0), 1e-12)
+            return ratio > float(getattr(self.gaussian_dict, "variance_ratio", 4.0))
+        var_new, aa = gp.check_new_inducing_var(z)
+        return bool(var_new > aa * 0.01)
 
     def record_gpr_data(self):
         if self.gpr_file is None:

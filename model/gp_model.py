@@ -344,6 +344,13 @@ class SparseFITCGP:
 
         self.cholesky_valid = True
 
+        # Reference posterior variance over the training inputs.  Used by the
+        # variance-based inducing-point criterion: a query whose posterior
+        # variance exceeds variance_ratio times this reference is treated as
+        # lying outside the training domain.
+        _, var_train = self.predict_noiseless(self.X, full_cov=False)
+        self.var_ref = float(np.mean(np.asarray(var_train)))
+
     # ------------------------------------------------------------------
 
     def update_mu_su(

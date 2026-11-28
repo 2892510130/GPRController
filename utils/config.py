@@ -75,6 +75,11 @@ class GaussianConfig:
     update_method:        str = "vfe"
     # forgetting factor used by the "vfe" update (1.0 = no forgetting)
     lambda_:              float = 1.0
+    # inducing-point criterion: "subspace" (residual variance of the inducing
+    # subspace, the default) or "variance" (posterior variance relative to the
+    # training-set reference, see variance_ratio)
+    inducing_criterion:   str = "subspace"
+    variance_ratio:       float = 4.0
 
     @classmethod
     def from_yaml(cls, file_path: str):
