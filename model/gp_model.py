@@ -829,10 +829,34 @@ class SparseFITCGP:
         self.cholesky_valid = False
         self.L_updated = False
 
+    def contributions(self) -> np.ndarray:
+        """Marginal contribution of each inducing point.
+
+        Proxy for the decrease of the variational bound when the point is
+        dropped: squared norm of the corresponding row of ``W = L_uu^{-1} K_uf``,
+        i.e. how much of the projected data energy that point carries.
+        """
+        return np.power(self.W, 2).sum(axis=1)
+
     def remove_inducing(self, remove_number: int | None = None, reserve_indices: list[int] | None = None) -> None:
-        raise NotImplementedError(
-            "remove_inducing is not implemented; rebuild the GP with fewer inducing points instead."
-        )
+        if remove_number is None and reserve_indices is None:
+            raise ValueError('Either remove_number or reserve_indices must be provided.')
+
+        keep = np.ones(self.M, dtype=bool)
+        if reserve_indices is not None:
+            keep[:] = False
+            keep[reserve_indices] = True
+        else:
+            keep[:remove_number] = False
+
+        U_keep = self.U[keep]
+        if U_keep.shape[0] == self.M:
+            return
+        # Rebuild the posterior for the reduced inducing set; the stored training
+        # data is reused, so pruning does not discard observations.
+        self.fit(self.X, self.Y, U_keep, variance=self.variance, lambda_=self.lambda_)
+
+
 
 class SparseDTCGP:
     def __init__(self, kernel: GPy.kern, gaussian_opts: GaussianConfig) -> None:

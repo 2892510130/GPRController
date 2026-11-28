@@ -47,7 +47,8 @@ VARIANTS = {
     "osvgp_add": (0, True, True, "vfe", 1.0),
     "first": (1, True, True, "vfe", 1.0),
     "bijl": (0, True, False, "bijl", 1.0),
-    "agp": (0, True, False, "window", 1.0),
+    "agp_window": (0, True, False, "window", 1.0),
+    "agp": (0, True, False, "agp", 0.99),
 }
 
 FIELDS = ["variant", "scenario", "seed", "steps", "terminated",

@@ -565,6 +565,15 @@ class LinearMPC:
                 elif method == "window":
                     gp.add_new_data(z_prev, np.atleast_1d(residual).reshape(1, 1))
                     gp.remove_data(1)
+                elif method == "agp":
+                    # forgetting + marginal-contribution based add / prune
+                    gp.update(z_prev, residual)
+                    budget = 2 * int(self.gaussian_dict.inducing_data_number)
+                    var, aa = gp.check_new_inducing_var(self.gpr_input.copy())
+                    if var > aa * 0.01 and gp.M < budget:
+                        gp.add_new_inducing(self.gpr_input.copy())
+                    elif gp.M >= budget:
+                        gp.remove_inducing(int(np.argmin(gp.contributions())))
                 else:
                     gp.update(z_prev, residual)
         if self.gaussian_dict.add_mu_su is True:
