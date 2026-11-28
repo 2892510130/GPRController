@@ -115,6 +115,10 @@ def run_method(case: str, method: str, incremental: bool):
                     gp.add_new_inducing(xi)
             gp.update_mu_su_bijl(xi, yi)
         elif method == "agp_window":
+            if incremental:
+                var_new, aa = gp.check_new_inducing_var(xi)
+                if var_new > aa * 0.01:
+                    gp.add_new_inducing(xi)
             gp.add_new_data(xi, np.atleast_1d(yi).reshape(1, 1))
             gp.remove_data(1)
         elif method == "agp_addrm":
