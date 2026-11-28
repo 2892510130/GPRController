@@ -85,13 +85,19 @@ def run_method(case: str, method: str, incremental: bool):
     kernel = RBF(input_dim=1, variance=1.0, lengthscale=1.0)
     opts = make_opts()
 
-    if method == "standard":
-        gp = GPRegression(x, y, kernel, noise_var=NOISE_STD ** 2)
-        mu, var = gp.predict(x_update)
+    if method == "full_gp":
+        gp_full = GPRegression(x, y, RBF(input_dim=1, variance=1.0, lengthscale=1.0),
+                               noise_var=NOISE_STD ** 2)
+        mu, var = gp_full.predict(x_update)
         return metrics(mu, var, y_update), 0.0
 
     gp = SparseFITCGP(kernel, opts)
     gp.fit(x, y, u_idx, NOISE_STD ** 2, lambda_=0.99 if method == "agp_window" else 1.0)
+
+    if method == "standard":
+        # baseline of the thesis: the sparse model right after fit, no update
+        mu, var = gp.predict(x_update, method="mu_su")
+        return metrics(mu, var, y_update), 0.0
 
     t0 = time.perf_counter()
     for xi, yi in zip(x_update, y_update):
