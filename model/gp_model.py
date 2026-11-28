@@ -686,6 +686,42 @@ class SparseFITCGP:
         self.mu = self.mu + L_b @ R_b
         self.Su = (1.0 / self.lambda_) * (self.Su - L_b @ V)
 
+    def update_mu_su_bijl(self, X_new: np.ndarray, Y_new: np.ndarray,
+                          Ksu: np.ndarray | None = None) -> None:
+        """Sequential update of Bijl and van Wingerden (2015).
+
+        Non-variational: the mean/covariance of the inducing variables are
+        updated through the matrix inversion lemma on the FITC posterior, with
+        no ELBO and no forgetting factor.
+        """
+        X_new = np.atleast_2d(X_new)
+        Y_new = np.atleast_1d(Y_new).reshape(-1, 1)
+
+        if self.gaussian_opts.normalize_y is True:
+            Y_new = self.normalizer.normalize(Y_new)
+
+        self.update_L()
+
+        if Ksu is None:
+            Ksu = _kern_K(self.kern, X_new, self.U)
+
+        Ktt_diag = _kern_Kdiag(self.kern, X_new)
+        Ws = self._solve_luu(Ksu.T)
+        Qtt_diag = np.power(Ws.T, 2).sum(axis=-1)
+        diag = Ktt_diag - Qtt_diag + self.variance
+
+        Luu_T_inv_Ws = self._solve_luu_t(Ws)
+        B_tmp = (Luu_T_inv_Ws * (1.0 / diag)) @ Luu_T_inv_Ws.T
+
+        Su_B = self.Su @ B_tmp
+        denom = 1.0 + np.trace(Su_B)
+        self.Su = self.Su - (Su_B @ self.Su) / denom
+
+        Su_B = self.Su @ B_tmp
+        denom = 1.0 + np.trace(Su_B)
+        self.mu = (np.eye(self.M) - Su_B / denom) @ self.mu \
+            + (self.Su @ Luu_T_inv_Ws * (1.0 / diag)) @ Y_new
+
     def update_L(self) -> None:
         if not self.L_updated:
             if not self.cholesky_valid:
@@ -1314,6 +1350,7 @@ class GaussianModel:
                     train_data[:, self.feature_size + i].reshape(-1, 1),
                     inducing_data[inducing_data_number * i:inducing_data_number * (i+1), :],
                     variance=params[i][0],
+                    lambda_=float(getattr(gaussian_opts, "lambda_", 1.0)),
                 )
 
             self.gps.append(gp)

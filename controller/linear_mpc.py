@@ -554,8 +554,19 @@ class LinearMPC:
         self.gpr_input[:, 2] = self.u_guess[0]
         self.gpr_input[:, 3] = self.u_guess[1]
         if self.gaussian_dict.update_mu_su is True and self.first_iter is False:
-            self.model.gaussian_model.gps[0].update(self.gpr_input_step_1.copy(), self.delta_v_nominal)
-            self.model.gaussian_model.gps[1].update(self.gpr_input_step_1.copy(), self.delta_w_nominal)
+            method = getattr(self.gaussian_dict, "update_method", "vfe")
+            for gp, residual in zip(
+                self.model.gaussian_model.gps,
+                (self.delta_v_nominal, self.delta_w_nominal),
+            ):
+                z_prev = self.gpr_input_step_1.copy()
+                if method == "bijl" and hasattr(gp, "update_mu_su_bijl"):
+                    gp.update_mu_su_bijl(z_prev, residual)
+                elif method == "window":
+                    gp.add_new_data(z_prev, np.atleast_1d(residual).reshape(1, 1))
+                    gp.remove_data(1)
+                else:
+                    gp.update(z_prev, residual)
         if self.gaussian_dict.add_mu_su is True:
             for gp in self.model.gaussian_model.gps:
                 var, aa = gp.check_new_inducing_var(self.gpr_input.copy())

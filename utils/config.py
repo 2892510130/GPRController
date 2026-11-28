@@ -69,6 +69,13 @@ class GaussianConfig:
 
     params:               List
 
+    # online update rule: "vfe" (rank-one variational/Kalman update),
+    # "bijl" (non-variational FITC rank-one update), "window" (fixed-length
+    # sliding window of training data, posterior recomputed every step).
+    update_method:        str = "vfe"
+    # forgetting factor used by the "vfe" update (1.0 = no forgetting)
+    lambda_:              float = 1.0
+
     @classmethod
     def from_yaml(cls, file_path: str):
         with open(file_path, 'r') as f:
